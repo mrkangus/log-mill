@@ -608,11 +608,29 @@ function packLog(diameterAcross, diameterVertical, kerf, boards) {
 function renderSvg(result) {
   const a = result.a;
   const b = result.b;
-  const pad = Math.max(0.6, result.kerf + 0.35);
-  const minX = -a - pad;
-  const minY = -b - pad;
-  const width = (a + pad) * 2.0;
-  const height = (b + pad) * 2.0;
+  const scale = Math.max(a, b, 1);
+  const extGap = Math.max(0.28, scale * 0.04);
+  const dimOff = Math.max(0.72, scale * 0.11);
+  const over = Math.max(0.16, scale * 0.022);
+  const arrow = Math.max(0.2, Math.min(0.55, scale * 0.04));
+  const wing = arrow * 0.36;
+  const labelSize = Math.max(0.46, Math.min(1.15, scale * 0.082));
+  const ink = "#7a756e";
+  const sidePad = Math.max(0.45, result.kerf + 0.25);
+  const topY = -b - extGap - dimOff;
+  const leftX = -a - extGap - dimOff;
+  const acrossText = fmtNum(result.diameter_across) + " in";
+  const verticalText = fmtNum(result.diameter_vertical) + " in";
+  const acrossFont = fitDimFont(acrossText, a * 2, labelSize);
+  const verticalFont = fitDimFont(verticalText, b * 2, labelSize);
+  const widthLabelY = topY - acrossFont * 0.78;
+  const heightLabelX = leftX - verticalFont * 0.78;
+  const minX = Math.min(-a - sidePad, heightLabelX - verticalFont * 0.7);
+  const minY = Math.min(-b - sidePad, widthLabelY - acrossFont * 0.7);
+  const maxX = a + sidePad;
+  const maxY = b + sidePad;
+  const width = maxX - minX;
+  const height = maxY - minY;
   const parts = [];
   parts.push(
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' +
@@ -650,7 +668,59 @@ function renderSvg(result) {
       }
     }
   }
+  parts.push(logDimensionMarkup(a, b, topY, leftX, extGap, over, arrow, wing, ink, acrossText, verticalText, acrossFont, verticalFont, widthLabelY, heightLabelX));
   parts.push("</svg>");
+  return parts.join("");
+}
+
+function fitDimFont(text, span, preferred) {
+  const estimate = Math.max(text.length, 1) * 0.58;
+  const fitted = (Math.max(span, 0.4) * 0.92) / estimate;
+  return Math.max(0.28, Math.min(preferred, fitted));
+}
+
+function dimLine(x1, y1, x2, y2, ink) {
+  return '<line x1="' + x1.toFixed(4) + '" y1="' + y1.toFixed(4) +
+    '" x2="' + x2.toFixed(4) + '" y2="' + y2.toFixed(4) +
+    '" fill="none" stroke="' + ink + '" stroke-width="1" vector-effect="non-scaling-stroke" stroke-linecap="butt"/>';
+}
+
+function dimArrow(tipX, tipY, ux, uy, arrow, wing, ink) {
+  const bx = tipX - ux * arrow;
+  const by = tipY - uy * arrow;
+  const px = -uy * wing;
+  const py = ux * wing;
+  return dimLine(bx + px, by + py, tipX, tipY, ink) + dimLine(bx - px, by - py, tipX, tipY, ink);
+}
+
+function logDimensionMarkup(a, b, topY, leftX, extGap, over, arrow, wing, ink, acrossText, verticalText, acrossFont, verticalFont, widthLabelY, heightLabelX) {
+  const start = extGap * 0.45;
+  const parts = [];
+  parts.push('<g class="log-dimensions">');
+  parts.push(dimLine(-a, -b - start, -a, topY - over, ink));
+  parts.push(dimLine(a, -b - start, a, topY - over, ink));
+  parts.push(dimLine(-a, topY, a, topY, ink));
+  parts.push(dimArrow(-a, topY, -1, 0, arrow, wing, ink));
+  parts.push(dimArrow(a, topY, 1, 0, arrow, wing, ink));
+  parts.push(
+    '<text class="log-dim-label log-dim-width" x="0" y="' + widthLabelY.toFixed(4) +
+      '" text-anchor="middle" dominant-baseline="middle" font-size="' + acrossFont.toFixed(3) +
+      '" font-family="Helvetica, Arial, sans-serif" fill="' + ink + '" stroke="none">' +
+      acrossText + "</text>"
+  );
+  parts.push(dimLine(-a - start, -b, leftX - over, -b, ink));
+  parts.push(dimLine(-a - start, b, leftX - over, b, ink));
+  parts.push(dimLine(leftX, -b, leftX, b, ink));
+  parts.push(dimArrow(leftX, -b, 0, -1, arrow, wing, ink));
+  parts.push(dimArrow(leftX, b, 0, 1, arrow, wing, ink));
+  parts.push(
+    '<text class="log-dim-label log-dim-height" x="' + heightLabelX.toFixed(4) + '" y="0" ' +
+      'text-anchor="middle" dominant-baseline="middle" font-size="' + verticalFont.toFixed(3) +
+      '" font-family="Helvetica, Arial, sans-serif" fill="' + ink + '" stroke="none" ' +
+      'transform="rotate(-90 ' + heightLabelX.toFixed(4) + ' 0)">' +
+      verticalText + "</text>"
+  );
+  parts.push("</g>");
   return parts.join("");
 }
 
