@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Log mill</title>
+<title>Log mill.</title>
 <style>
   body { margin: 0; background: #fff; color: #1c1c1c;
     font: 16px/1.45 "Segoe UI", Helvetica, Arial, sans-serif; }
@@ -26,6 +26,12 @@
   button.remove, button#add { background: #fff; border: 1px solid #ccc; padding: 6px 8px; }
   button.remove { padding: 6px 8px; }
   #add { margin-top: 4px; }
+  .qty-cell { display: flex; flex-direction: column; gap: 4px; min-width: 9.5rem; }
+  .qty-cell select { width: 100%; box-sizing: border-box; padding: 6px 8px;
+    border: 1px solid #ccc; border-radius: 4px; font: inherit; background: #fff; color: #111; }
+  .qty-cell .qty-input { width: 100%; }
+  .qty-cell.maximize .qty-input { display: none; }
+  th.qty-head { min-width: 9.5rem; }
   #figure { background: #1c1c1c; color: #fff; border: 0; padding: 9px 16px; margin-top: 14px; }
   #figure:disabled { opacity: 0.6; cursor: wait; }
   .limit { margin: 10px 0 0; color: #444; font-size: 0.92rem; }
@@ -41,7 +47,7 @@
 </head>
 <body>
 <main>
-  <h1>Log mill</h1>
+  <h1>Log mill.</h1>
   <p class="sub">Boards from one elliptical cross-section. A swapped pair is the same size (10 by 2 is a 2×10).</p>
   <div class="layout">
     <form id="plan">
@@ -63,19 +69,31 @@
         <legend>Desired boards</legend>
         <table>
           <thead>
-            <tr><th>Thickness</th><th>Width</th><th>Quantity</th><th></th></tr>
+            <tr><th>Thickness</th><th>Width</th><th class="qty-head">How many</th><th></th></tr>
           </thead>
           <tbody id="boards">
             <tr>
               <td><input name="thickness" type="number" min="0" step="any" value="1" required inputmode="decimal"></td>
               <td><input name="width" type="number" min="0" step="any" value="10" required inputmode="decimal"></td>
-              <td><input name="quantity" type="number" min="0" step="1" value="5" required inputmode="numeric"></td>
+              <td class="qty-cell">
+                <select name="qtyMode" aria-label="How many">
+                  <option value="count" selected>Count</option>
+                  <option value="maximize">As many as will fit</option>
+                </select>
+                <input name="quantity" class="qty-input" type="number" min="0" step="1" value="5" required inputmode="numeric" aria-label="Count">
+              </td>
               <td><button type="button" class="remove">Remove</button></td>
             </tr>
             <tr>
               <td><input name="thickness" type="number" min="0" step="any" value="2" required inputmode="decimal"></td>
               <td><input name="width" type="number" min="0" step="any" value="4" required inputmode="decimal"></td>
-              <td><input name="quantity" type="number" min="0" step="1" value="2" required inputmode="numeric"></td>
+              <td class="qty-cell">
+                <select name="qtyMode" aria-label="How many">
+                  <option value="count" selected>Count</option>
+                  <option value="maximize">As many as will fit</option>
+                </select>
+                <input name="quantity" class="qty-input" type="number" min="0" step="1" value="2" required inputmode="numeric" aria-label="Count">
+              </td>
               <td><button type="button" class="remove">Remove</button></td>
             </tr>
           </tbody>
@@ -86,7 +104,7 @@
       <p class="limit">Practical 1/8 inch search, not a proven optimum.</p>
     </form>
     <section id="out" aria-live="polite">
-      <p class="muted">The diagram shows up here. Requested boards go in first, largest area first. Leftover space is filled with other common sizes, nothing smaller than 1×2.</p>
+      <p class="muted">The diagram shows up here. Desired sizes are placed in the order you enter them (a count, or as many as will fit). Leftover space is filled with other common sizes, nothing smaller than 1×2.</p>
     </section>
   </div>
 </main>
@@ -387,10 +405,16 @@ function asRequests(boards) {
     let thickness;
     let width;
     let quantity;
+    let maximize = false;
     if (board && !Array.isArray(board) && typeof board === "object") {
       thickness = board.thickness;
       width = board.width;
-      quantity = board.quantity !== undefined ? board.quantity : board.qty !== undefined ? board.qty : 0;
+      maximize = board.maximize === true || board.mode === "maximize" || board.qtyMode === "maximize";
+      if (maximize) {
+        quantity = null;
+      } else {
+        quantity = board.quantity !== undefined ? board.quantity : board.qty !== undefined ? board.qty : 0;
+      }
     } else {
       if (!Array.isArray(board) || board.length !== 3) {
         throw new InputError("Board row " + (index + 1) + " needs thickness, width, and quantity.");
@@ -404,6 +428,13 @@ function asRequests(boards) {
     if (!Number.isFinite(thickness) || !Number.isFinite(width)) {
       throw new InputError("Board row " + (index + 1) + " has a bad thickness or width.");
     }
+    if (!Number.isFinite(thickness) || thickness <= 0 || !Number.isFinite(width) || width <= 0) {
+      throw new InputError("Board row " + (index + 1) + " thickness and width must be positive.");
+    }
+    if (maximize) {
+      requests.push({ thickness, width, quantity: null, maximize: true, index });
+      return;
+    }
     if (typeof quantity === "boolean" || (typeof quantity !== "number" && typeof quantity !== "string")) {
       throw new InputError("Board row " + (index + 1) + " quantity must be a whole number.");
     }
@@ -412,19 +443,15 @@ function asRequests(boards) {
       throw new InputError("Board row " + (index + 1) + " quantity must be a whole number.");
     }
     if (!Number.isFinite(qNum) || !Number.isInteger(qNum)) {
-      // Python float.is_integer
       if (!Number.isFinite(qNum) || Math.abs(qNum - Math.round(qNum)) > 1e-9) {
         throw new InputError("Board row " + (index + 1) + " quantity must be a whole number.");
       }
     }
     quantity = Math.trunc(qNum);
-    if (!Number.isFinite(thickness) || thickness <= 0 || !Number.isFinite(width) || width <= 0) {
-      throw new InputError("Board row " + (index + 1) + " thickness and width must be positive.");
-    }
     if (quantity < 0) {
       throw new InputError("Board row " + (index + 1) + " quantity cannot be negative.");
     }
-    requests.push({ thickness, width, quantity, index });
+    requests.push({ thickness, width, quantity, maximize: false, index });
   });
   return requests;
 }
@@ -451,18 +478,13 @@ function packLog(diameterAcross, diameterVertical, kerf, boards) {
   const assigned = {};
   const rectangles = [];
 
-  const order = requests.slice().sort((p, q) => {
-    const pa = -(p.thickness * p.width);
-    const qa = -(q.thickness * q.width);
-    if (pa < qa) return -1;
-    if (pa > qa) return 1;
-    return p.index - q.index;
-  });
+  // Place desired sizes in the order entered (top to bottom).
   const placedByIndex = {};
   for (const row of requests) placedByIndex[row.index] = 0;
 
-  for (const row of order) {
-    for (let n = 0; n < row.quantity; n++) {
+  for (const row of requests) {
+    const limit = row.maximize ? 400 : row.quantity;
+    for (let n = 0; n < limit; n++) {
       const rect = placeOne(spatial, cache, row.thickness, row.width, a, b, kerf);
       if (rect === null) break;
       placedByIndex[row.index] += 1;
@@ -484,20 +506,21 @@ function packLog(diameterAcross, diameterVertical, kerf, boards) {
   const requestResults = [];
   for (const row of requests) {
     const placed = placedByIndex[row.index];
-    if (placed > row.quantity) {
+    if (!row.maximize && placed > row.quantity) {
       throw new Error("Placed more boards than requested.");
     }
     const [fill, stroke] = colorFor(row.thickness, row.width, assigned);
     requestResults.push({
       thickness: row.thickness,
       width: row.width,
-      quantity: row.quantity,
+      quantity: row.maximize ? null : row.quantity,
+      maximize: row.maximize,
       placed,
       label: sizeLabel(row.thickness, row.width),
       fill,
       stroke,
     });
-    if (row.quantity > 0) requestedKeys.add(sizeKey(row.thickness, row.width));
+    if (row.maximize || row.quantity > 0) requestedKeys.add(sizeKey(row.thickness, row.width));
   }
 
   const fillerOrder = COMMON_SIZES.slice().sort((p, q) => {
@@ -615,7 +638,8 @@ function resultPayload(result) {
   for (const row of result.requests) {
     lines.push({
       label: row.label,
-      requested: row.quantity,
+      requested: row.maximize ? null : row.quantity,
+      maximize: !!row.maximize,
       placed: row.placed,
       filler: false,
       fill: row.fill,
@@ -648,33 +672,101 @@ function resultPayload(result) {
 
 
 const boards = document.getElementById("boards");
+
+function syncQtyMode(cell) {
+  if (!cell) return;
+  const mode = cell.querySelector('[name="qtyMode"]');
+  const input = cell.querySelector('[name="quantity"]');
+  if (!mode || !input) return;
+  const maximize = mode.value === "maximize";
+  cell.classList.toggle("maximize", maximize);
+  if (maximize) {
+    input.removeAttribute("required");
+  } else {
+    input.setAttribute("required", "required");
+  }
+}
+
+function qtyCellHtml(countValue) {
+  const valueAttr = countValue === "" || countValue === null || countValue === undefined
+    ? ""
+    : ' value="' + countValue + '"';
+  return '<td class="qty-cell">'
+    + '<select name="qtyMode" aria-label="How many">'
+    + '<option value="count" selected>Count</option>'
+    + '<option value="maximize">As many as will fit</option>'
+    + '</select>'
+    + '<input name="quantity" class="qty-input" type="number" min="0" step="1"' + valueAttr
+    + ' required inputmode="numeric" aria-label="Count" placeholder="1">'
+    + '</td>';
+}
+
 document.getElementById("add").addEventListener("click", () => {
   const row = document.createElement("tr");
   row.innerHTML = '<td><input name="thickness" type="number" min="0" step="any" required inputmode="decimal"></td>'
     + '<td><input name="width" type="number" min="0" step="any" required inputmode="decimal"></td>'
-    + '<td><input name="quantity" type="number" min="0" step="1" value="1" required inputmode="numeric"></td>'
+    + qtyCellHtml("")
     + '<td><button type="button" class="remove">Remove</button></td>';
   boards.appendChild(row);
+  syncQtyMode(row.querySelector(".qty-cell"));
 });
+
 boards.addEventListener("click", (event) => {
   if (event.target.classList.contains("remove")) {
     const row = event.target.closest("tr");
     if (row) row.remove();
   }
 });
+
+boards.addEventListener("change", (event) => {
+  if (event.target && event.target.name === "qtyMode") {
+    syncQtyMode(event.target.closest(".qty-cell"));
+  }
+});
+
+boards.querySelectorAll(".qty-cell").forEach(syncQtyMode);
+
 function showError(message) {
   const out = document.getElementById("out");
   out.innerHTML = '<p class="error"></p>';
   out.querySelector(".error").textContent = message;
 }
+
+function readBoardRows() {
+  return [...boards.querySelectorAll("tr")].map((row, index) => {
+    const thicknessRaw = row.querySelector('[name="thickness"]').value;
+    const widthRaw = row.querySelector('[name="width"]').value;
+    const mode = row.querySelector('[name="qtyMode"]').value;
+    const quantityRaw = row.querySelector('[name="quantity"]').value;
+    const thickness = Number(thicknessRaw);
+    const width = Number(widthRaw);
+    if (!Number.isFinite(thickness) || !Number.isFinite(width)) {
+      throw new InputError("Board row " + (index + 1) + " has a bad thickness or width.");
+    }
+    if (mode === "maximize") {
+      return { thickness, width, maximize: true };
+    }
+    if (quantityRaw.trim() === "") {
+      throw new InputError("Board row " + (index + 1) + " needs a count, or choose As many as will fit.");
+    }
+    const quantity = Number(quantityRaw);
+    if (!Number.isFinite(quantity)) {
+      throw new InputError("Board row " + (index + 1) + " quantity must be a whole number.");
+    }
+    return { thickness, width, quantity, maximize: false };
+  });
+}
+
 document.getElementById("plan").addEventListener("submit", (event) => {
   event.preventDefault();
   const button = document.getElementById("figure");
-  const rows = [...boards.querySelectorAll("tr")].map((row) => ({
-    thickness: Number(row.querySelector('[name="thickness"]').value),
-    width: Number(row.querySelector('[name="width"]').value),
-    quantity: Number(row.querySelector('[name="quantity"]').value)
-  })).filter((row) => Number.isFinite(row.thickness) && Number.isFinite(row.width) && Number.isFinite(row.quantity));
+  let rows;
+  try {
+    rows = readBoardRows();
+  } catch (err) {
+    showError(err instanceof InputError ? err.message : "The planner failed.");
+    return;
+  }
   button.disabled = true;
   window.setTimeout(() => {
     try {
@@ -686,9 +778,14 @@ document.getElementById("plan").addEventListener("submit", (event) => {
       );
       const data = resultPayload(result);
       const items = data.lines.map((line) => {
-        const text = line.filler
-          ? line.label + ": " + line.placed + " from leftover"
-          : line.label + ": placed " + line.placed + " of " + line.requested + " requested";
+        let text;
+        if (line.filler) {
+          text = line.label + ": " + line.placed + " from leftover";
+        } else if (line.maximize) {
+          text = line.label + ": placed " + line.placed + " (as many as will fit)";
+        } else {
+          text = line.label + ": placed " + line.placed + " of " + line.requested + " requested";
+        }
         return "<li>" + text + "</li>";
       }).join("");
       const legend = data.lines.filter((line) => line.placed > 0).map((line) => {
