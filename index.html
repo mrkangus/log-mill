@@ -17,8 +17,11 @@
   .dims { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
   @media (max-width: 520px) { .dims { grid-template-columns: 1fr; } }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.82rem; color: #333; }
-  input[type="number"] { width: 100%; box-sizing: border-box; padding: 7px 8px;
+  input[type="number"], select { width: 100%; box-sizing: border-box; padding: 7px 8px;
     border: 1px solid #ccc; border-radius: 4px; font: inherit; background: #fff; color: #111; }
+  .kerf-field { display: flex; flex-direction: column; gap: 4px; }
+  .kerf-field.preset #kerfCustom { display: none; }
+  .kerf-field.custom #kerfCustom { display: block; }
   table { width: 100%; border-collapse: collapse; margin-top: 4px; }
   th { text-align: left; font-size: 0.78rem; font-weight: 600; color: #444; padding: 0 6px 4px 0; }
   td { padding: 0 6px 6px 0; }
@@ -32,8 +35,10 @@
   .qty-cell .qty-input { width: 100%; }
   .qty-cell.maximize .qty-input { display: none; }
   th.qty-head { min-width: 9.5rem; }
-  #figure { background: #1c1c1c; color: #fff; border: 0; padding: 9px 16px; margin-top: 14px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; align-items: center; }
+  #figure { background: #1c1c1c; color: #fff; border: 0; padding: 9px 16px; }
   #figure:disabled { opacity: 0.6; cursor: wait; }
+  #clear { background: #fff; color: #1c1c1c; border: 1px solid #ccc; padding: 9px 16px; }
   .limit { margin: 10px 0 0; color: #444; font-size: 0.92rem; }
   .error { color: #8d1d1d; margin: 0 0 10px; }
   .diagram svg { width: 100%; height: auto; max-height: 640px; display: block; }
@@ -60,9 +65,22 @@
           <label>Diameter vertical (inches)
             <input id="vertical" name="vertical" type="number" min="0" step="any" value="19" required inputmode="decimal">
           </label>
-          <label>Kerf (inches)
-            <input id="kerf" name="kerf" type="number" min="0" step="any" value="0.125" required inputmode="decimal">
-          </label>
+          <div class="kerf-field preset" id="kerfField">
+            <label for="kerfPreset">Kerf
+              <select id="kerfPreset" name="kerfPreset" aria-label="Kerf">
+                <option value="0.0625">1/16 (0.0625 in)</option>
+                <option value="0.09375">3/32 (0.09375 in)</option>
+                <option value="0.125" selected>1/8 (0.125 in)</option>
+                <option value="0.15625">5/32 (0.15625 in)</option>
+                <option value="0.1875">3/16 (0.1875 in)</option>
+                <option value="0.25">1/4 (0.25 in)</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+            <label for="kerfCustom" class="kerf-custom-label">Custom kerf (inches)
+              <input id="kerfCustom" name="kerfCustom" type="number" min="0" step="any" value="" inputmode="decimal" aria-label="Custom kerf in inches">
+            </label>
+          </div>
         </div>
       </fieldset>
       <fieldset>
@@ -100,7 +118,10 @@
         </table>
         <button type="button" id="add">Add board</button>
       </fieldset>
-      <button type="submit" id="figure">Figure the cut</button>
+      <div class="actions">
+        <button type="submit" id="figure">Figure the cut</button>
+        <button type="button" id="clear">Clear</button>
+      </div>
       <p class="limit">Practical 1/8 inch search, not a proven optimum.</p>
     </form>
     <section id="out" aria-live="polite">
@@ -671,6 +692,44 @@ function resultPayload(result) {
 }
 
 
+function syncKerfField() {
+  const field = document.getElementById("kerfField");
+  const preset = document.getElementById("kerfPreset");
+  const custom = document.getElementById("kerfCustom");
+  if (!field || !preset || !custom) return;
+  const isCustom = preset.value === "custom";
+  field.classList.toggle("preset", !isCustom);
+  field.classList.toggle("custom", isCustom);
+  if (isCustom) {
+    custom.setAttribute("required", "required");
+  } else {
+    custom.removeAttribute("required");
+  }
+}
+
+function readKerfInches() {
+  const preset = document.getElementById("kerfPreset");
+  if (preset.value === "custom") {
+    const raw = document.getElementById("kerfCustom").value;
+    if (String(raw).trim() === "") {
+      throw new InputError("Enter a custom kerf in inches, or pick a common size.");
+    }
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0) {
+      throw new InputError("Kerf must be zero or a positive number.");
+    }
+    return value;
+  }
+  const value = Number(preset.value);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new InputError("Kerf must be zero or a positive number.");
+  }
+  return value;
+}
+
+document.getElementById("kerfPreset").addEventListener("change", syncKerfField);
+syncKerfField();
+
 const boards = document.getElementById("boards");
 
 function syncQtyMode(cell) {
@@ -761,8 +820,10 @@ document.getElementById("plan").addEventListener("submit", (event) => {
   event.preventDefault();
   const button = document.getElementById("figure");
   let rows;
+  let kerf;
   try {
     rows = readBoardRows();
+    kerf = readKerfInches();
   } catch (err) {
     showError(err instanceof InputError ? err.message : "The planner failed.");
     return;
@@ -773,7 +834,7 @@ document.getElementById("plan").addEventListener("submit", (event) => {
       const result = packLog(
         document.getElementById("across").value,
         document.getElementById("vertical").value,
-        document.getElementById("kerf").value,
+        kerf,
         rows
       );
       const data = resultPayload(result);
@@ -802,6 +863,29 @@ document.getElementById("plan").addEventListener("submit", (event) => {
       button.disabled = false;
     }
   }, 0);
+});
+
+const EMPTY_OUT = '<p class="muted">The diagram shows up here. Desired sizes are placed in the order you enter them (a count, or as many as will fit). Leftover space is filled with other common sizes, nothing smaller than 1×2.</p>';
+
+function emptyBoardRowHtml() {
+  return '<tr>'
+    + '<td><input name="thickness" type="number" min="0" step="any" required inputmode="decimal"></td>'
+    + '<td><input name="width" type="number" min="0" step="any" required inputmode="decimal"></td>'
+    + qtyCellHtml("")
+    + '<td><button type="button" class="remove">Remove</button></td>'
+    + '</tr>';
+}
+
+document.getElementById("clear").addEventListener("click", () => {
+  document.getElementById("across").value = "";
+  document.getElementById("vertical").value = "";
+  document.getElementById("kerfPreset").value = "0.125";
+  document.getElementById("kerfCustom").value = "";
+  syncKerfField();
+  boards.innerHTML = emptyBoardRowHtml();
+  syncQtyMode(boards.querySelector(".qty-cell"));
+  document.getElementById("out").innerHTML = EMPTY_OUT;
+  document.getElementById("figure").disabled = false;
 });
 </script>
 </body>
