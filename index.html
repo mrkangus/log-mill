@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Log mill</title>
+<style>
+  body { margin: 0; background: #fff; color: #1c1c1c;
+    font: 16px/1.45 "Segoe UI", Helvetica, Arial, sans-serif; }
+  main { max-width: 1080px; margin: 0 auto; padding: 28px 22px 56px; }
+  h1 { font-size: 1.55rem; font-weight: 650; margin: 0 0 4px; }
+  .sub { margin: 0 0 18px; color: #444; }
+  .layout { display: grid; grid-template-columns: minmax(280px, 360px) 1fr; gap: 32px; align-items: start; }
+  @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+  fieldset { border: 1px solid #ddd; border-radius: 8px; margin: 0 0 14px; padding: 12px 14px 14px; }
+  legend { padding: 0 6px; font-size: 0.92rem; }
+  .dims { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  @media (max-width: 520px) { .dims { grid-template-columns: 1fr; } }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 0.82rem; color: #333; }
+  input[type="number"] { width: 100%; box-sizing: border-box; padding: 7px 8px;
+    border: 1px solid #ccc; border-radius: 4px; font: inherit; background: #fff; color: #111; }
+  table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+  th { text-align: left; font-size: 0.78rem; font-weight: 600; color: #444; padding: 0 6px 4px 0; }
+  td { padding: 0 6px 6px 0; }
+  button { font: inherit; cursor: pointer; border-radius: 4px; }
+  button.remove, button#add { background: #fff; border: 1px solid #ccc; padding: 6px 8px; }
+  button.remove { padding: 6px 8px; }
+  #add { margin-top: 4px; }
+  #figure { background: #1c1c1c; color: #fff; border: 0; padding: 9px 16px; margin-top: 14px; }
+  #figure:disabled { opacity: 0.6; cursor: wait; }
+  .limit { margin: 10px 0 0; color: #444; font-size: 0.92rem; }
+  .error { color: #8d1d1d; margin: 0 0 10px; }
+  .diagram svg { width: 100%; height: auto; max-height: 640px; display: block; }
+  .counts { margin: 8px 0 12px; padding-left: 18px; }
+  .counts li { margin: 2px 0; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 14px; list-style: none; padding: 0; margin: 8px 0 0; }
+  .legend li { display: flex; align-items: center; gap: 6px; font-size: 0.92rem; }
+  .swatch { width: 18px; height: 18px; border-radius: 3px; box-sizing: border-box; }
+  .muted { color: #555; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Log mill</h1>
+  <p class="sub">Boards from one elliptical cross-section. A swapped pair is the same size (10 by 2 is a 2×10).</p>
+  <div class="layout">
+    <form id="plan">
+      <fieldset>
+        <legend>Log</legend>
+        <div class="dims">
+          <label>Diameter across (inches)
+            <input id="across" name="across" type="number" min="0" step="any" value="20" required inputmode="decimal">
+          </label>
+          <label>Diameter vertical (inches)
+            <input id="vertical" name="vertical" type="number" min="0" step="any" value="19" required inputmode="decimal">
+          </label>
+          <label>Kerf (inches)
+            <input id="kerf" name="kerf" type="number" min="0" step="any" value="0.125" required inputmode="decimal">
+          </label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Desired boards</legend>
+        <table>
+          <thead>
+            <tr><th>Thickness</th><th>Width</th><th>Quantity</th><th></th></tr>
+          </thead>
+          <tbody id="boards">
+            <tr>
+              <td><input name="thickness" type="number" min="0" step="any" value="1" required inputmode="decimal"></td>
+              <td><input name="width" type="number" min="0" step="any" value="10" required inputmode="decimal"></td>
+              <td><input name="quantity" type="number" min="0" step="1" value="5" required inputmode="numeric"></td>
+              <td><button type="button" class="remove">Remove</button></td>
+            </tr>
+            <tr>
+              <td><input name="thickness" type="number" min="0" step="any" value="2" required inputmode="decimal"></td>
+              <td><input name="width" type="number" min="0" step="any" value="4" required inputmode="decimal"></td>
+              <td><input name="quantity" type="number" min="0" step="1" value="2" required inputmode="numeric"></td>
+              <td><button type="button" class="remove">Remove</button></td>
+            </tr>
+          </tbody>
+        </table>
+        <button type="button" id="add">Add board</button>
+      </fieldset>
+      <button type="submit" id="figure">Figure the cut</button>
+      <p class="limit">Practical 1/8 inch search, not a proven optimum.</p>
+    </form>
+    <section id="out" aria-live="polite">
+      <p class="muted">The diagram shows up here. Requested boards go in first, largest area first. Leftover space is filled with other common sizes, nothing smaller than 1×2.</p>
+    </section>
+  </div>
+</main>
+<script>
+"use strict";
+
+const GRID = 0.125;
+const INSIDE_EPS = 1e-9;
+const GAP_EPS = 1e-7;
+
+const COLORS = {
+  "2,4": ["#F6E7A8", "#A89860"],
+  "2,6": ["#B9D4F0", "#6E8EAE"],
+  "2,8": ["#C5E0C8", "#6E9474"],
+  "2,10": ["#F8CFA8", "#B88762"],
+  "2,2": ["#E4D2F5", "#7D63A6"],
+  "1,10": ["#F7C9D6", "#B15D7C"],
+  "1,8": ["#C9EFE6", "#4F9484"],
+  "1,6": ["#F8D2C4", "#C07058"],
+  "1,4": ["#DCD4F6", "#7468A4"],
+  "1,2": ["#E4E7C4", "#7A8048"],
+  "0.75,6.5": ["#F0C6E8", "#A45A96"],
+};
+
+const COLOR_PAIRS = new Set(Object.values(COLORS).map((pair) => pair[0] + "|" + pair[1]));
+
+const EXTRA_COLORS = [
+  ["#D5F0C8", "#5E8A52"],
+  ["#F8E0F4", "#A06090"],
+  ["#C8E4F8", "#4E78A0"],
+  ["#F6E4C0", "#A08040"],
+  ["#E0D0F0", "#705090"],
+  ["#C8F0E8", "#3E8878"],
+  ["#F8D0C8", "#B06050"],
+  ["#E8E0F8", "#6860A0"],
+  ["#D8F0A8", "#688030"],
+  ["#F0D8E0", "#906070"],
+  ["#C8D8F0", "#506088"],
+  ["#F4E8D0", "#907850"],
+];
+
+const COMMON_SIZES = [
+  [2.0, 10.0],
+  [2.0, 8.0],
+  [2.0, 6.0],
+  [2.0, 4.0],
+  [2.0, 2.0],
+  [1.0, 10.0],
+  [1.0, 8.0],
+  [1.0, 6.0],
+  [1.0, 4.0],
+  [1.0, 2.0],
+];
+
+const NOTE = "Practical 1/8 inch search, not a proven optimum.";
+
+class InputError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "InputError";
+  }
+}
+
+function fmtNum(value) {
+  value = Number(value);
+  if (Math.abs(value - Math.round(value)) < 1e-9) {
+    return String(Math.round(value));
+  }
+  let text = value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+  return text;
+}
+
+function canonical(thickness, width) {
+  const t = Number(thickness);
+  const w = Number(width);
+  if (t <= w) return [t, w];
+  return [w, t];
+}
+
+function pyRound(value, digits) {
+  const p = 10 ** digits;
+  const n = value * p;
+  const sign = n < 0 ? -1 : 1;
+  const abs = Math.abs(n);
+  const floor = Math.floor(abs);
+  const frac = abs - floor;
+  let rounded;
+  if (Math.abs(frac - 0.5) <= 1e-10) {
+    rounded = floor % 2 === 0 ? floor : floor + 1;
+  } else {
+    rounded = Math.round(abs);
+  }
+  return (sign * rounded) / p;
+}
+
+function sizeKey(thickness, width) {
+  const [t, w] = canonical(thickness, width);
+  return pyRound(t, 6) + "," + pyRound(w, 6);
+}
+
+function sizeLabel(thickness, width) {
+  const [t, w] = canonical(thickness, width);
+  return fmtNum(t) + "\u00d7" + fmtNum(w);
+}
+
+function colorFor(thickness, width, assigned) {
+  const key = sizeKey(thickness, width);
+  if (Object.prototype.hasOwnProperty.call(assigned, key)) {
+    return assigned[key];
+  }
+  if (Object.prototype.hasOwnProperty.call(COLORS, key)) {
+    assigned[key] = COLORS[key];
+    return assigned[key];
+  }
+  const used = new Set(Object.values(assigned).map((pair) => pair[0]));
+  for (const pair of EXTRA_COLORS) {
+    const fill = pair[0];
+    const stroke = pair[1];
+    if (!used.has(fill) && !COLOR_PAIRS.has(fill + "|" + stroke)) {
+      assigned[key] = pair;
+      return pair;
+    }
+  }
+  const keys = Object.keys(assigned);
+  assigned[key] = EXTRA_COLORS[keys.length % EXTRA_COLORS.length];
+  return assigned[key];
+}
+
+function pointInside(x, y, a, b) {
+  return (x / a) ** 2 + (y / b) ** 2 <= 1.0 + INSIDE_EPS;
+}
+
+function corners(x, y, w, h) {
+  return [
+    [x, y],
+    [x + w, y],
+    [x, y + h],
+    [x + w, y + h],
+  ];
+}
+
+function bandInside(x, y, w, h, a, b, kerf) {
+  const ox = x - kerf;
+  const oy = y - kerf;
+  const ow = w + 2.0 * kerf;
+  const oh = h + 2.0 * kerf;
+  for (const [px, py] of corners(x, y, w, h)) {
+    if (!pointInside(px, py, a, b)) return false;
+  }
+  for (const [px, py] of corners(ox, oy, ow, oh)) {
+    if (!pointInside(px, py, a, b)) return false;
+  }
+  return true;
+}
+
+function gapsOverlap(ax, ay, aw, ah, bx, by, bw, bh, kerf) {
+  return !(
+    ax + aw + kerf <= bx + GAP_EPS ||
+    bx + bw + kerf <= ax + GAP_EPS ||
+    ay + ah + kerf <= by + GAP_EPS ||
+    by + bh + kerf <= ay + GAP_EPS
+  );
+}
+
+function gridValues(lo, hi, step) {
+  const i0 = Math.ceil(lo / step - 1e-9);
+  const i1 = Math.floor(hi / step + 1e-9);
+  const out = [];
+  for (let i = i0; i <= i1; i++) out.push(i * step);
+  return out;
+}
+
+class Spatial {
+  constructor(cell = 2.0) {
+    this.cell = cell;
+    this.rects = [];
+    this.buckets = new Map();
+    this.seen = [];
+    this.stamp = 0;
+  }
+
+  keys(x, y, w, h) {
+    const c = this.cell;
+    const ix0 = Math.floor(x / c);
+    const iy0 = Math.floor(y / c);
+    const ix1 = Math.floor((x + w) / c);
+    const iy1 = Math.floor((y + h) / c);
+    const out = [];
+    for (let iy = iy0; iy <= iy1; iy++) {
+      for (let ix = ix0; ix <= ix1; ix++) out.push(ix + "," + iy);
+    }
+    return out;
+  }
+
+  add(rect) {
+    const index = this.rects.length;
+    this.rects.push(rect);
+    this.seen.push(0);
+    const [x, y, w, h] = rect;
+    for (const key of this.keys(x, y, w, h)) {
+      let bucket = this.buckets.get(key);
+      if (!bucket) {
+        bucket = [];
+        this.buckets.set(key, bucket);
+      }
+      bucket.push(index);
+    }
+  }
+
+  collides(x, y, w, h, kerf) {
+    this.stamp += 1;
+    const stamp = this.stamp;
+    const qx = x - kerf;
+    const qy = y - kerf;
+    const qw = w + 2.0 * kerf;
+    const qh = h + 2.0 * kerf;
+    for (const key of this.keys(qx, qy, qw, qh)) {
+      const bucket = this.buckets.get(key);
+      if (!bucket) continue;
+      for (const index of bucket) {
+        if (this.seen[index] === stamp) continue;
+        this.seen[index] = stamp;
+        const [px, py, pw, ph] = this.rects[index];
+        if (gapsOverlap(x, y, w, h, px, py, pw, ph, kerf)) return true;
+      }
+    }
+    return false;
+  }
+}
+
+function candidates(w, h, a, b, kerf, step) {
+  const found = [];
+  if (w <= 0 || h <= 0) return found;
+  const ys = gridValues(-b, b, step);
+  const xs = gridValues(-a, a, step);
+  for (const y of ys) {
+    for (const x of xs) {
+      if (bandInside(x, y, w, h, a, b, kerf)) found.push([x, y]);
+    }
+  }
+  found.sort((p, q) => {
+    const py = -(p[1] + h);
+    const qy = -(q[1] + h);
+    if (py < qy) return -1;
+    if (py > qy) return 1;
+    const pa = Math.abs(p[0] + w / 2.0);
+    const qa = Math.abs(q[0] + w / 2.0);
+    if (pa < qa) return -1;
+    if (pa > qa) return 1;
+    if (p[0] < q[0]) return -1;
+    if (p[0] > q[0]) return 1;
+    return 0;
+  });
+  return found;
+}
+
+function orientations(thickness, width) {
+  const options = [[Number(width), Number(thickness)]];
+  if (Math.abs(thickness - width) > 1e-9) {
+    options.push([Number(thickness), Number(width)]);
+  }
+  options.sort((a, b) => {
+    if (a[0] !== b[0]) return b[0] - a[0];
+    return b[1] - a[1];
+  });
+  const unique = [];
+  const seen = new Set();
+  for (const item of options) {
+    const key = pyRound(item[0], 6) + "," + pyRound(item[1], 6);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(item);
+  }
+  return unique;
+}
+
+function placeOne(spatial, cache, thickness, width, a, b, kerf) {
+  for (const [ow, oh] of orientations(thickness, width)) {
+    const key = pyRound(ow, 6) + "," + pyRound(oh, 6) + "," + pyRound(kerf, 6);
+    if (!Object.prototype.hasOwnProperty.call(cache, key)) {
+      cache[key] = candidates(ow, oh, a, b, kerf, GRID);
+    }
+    for (const [x, y] of cache[key]) {
+      if (!spatial.collides(x, y, ow, oh, kerf)) {
+        const rect = [x, y, ow, oh];
+        spatial.add(rect);
+        return rect;
+      }
+    }
+  }
+  return null;
+}
+
+function asRequests(boards) {
+  const requests = [];
+  if (boards == null) return requests;
+  boards.forEach((board, index) => {
+    let thickness;
+    let width;
+    let quantity;
+    if (board && !Array.isArray(board) && typeof board === "object") {
+      thickness = board.thickness;
+      width = board.width;
+      quantity = board.quantity !== undefined ? board.quantity : board.qty !== undefined ? board.qty : 0;
+    } else {
+      if (!Array.isArray(board) || board.length !== 3) {
+        throw new InputError("Board row " + (index + 1) + " needs thickness, width, and quantity.");
+      }
+      thickness = board[0];
+      width = board[1];
+      quantity = board[2];
+    }
+    thickness = Number(thickness);
+    width = Number(width);
+    if (!Number.isFinite(thickness) || !Number.isFinite(width)) {
+      throw new InputError("Board row " + (index + 1) + " has a bad thickness or width.");
+    }
+    if (typeof quantity === "boolean" || (typeof quantity !== "number" && typeof quantity !== "string")) {
+      throw new InputError("Board row " + (index + 1) + " quantity must be a whole number.");
+    }
+    const qNum = typeof quantity === "string" ? Number(quantity) : quantity;
+    if (typeof quantity === "string" && quantity.trim() === "") {
+      throw new InputError("Board row " + (index + 1) + " quantity must be a whole number.");
+    }
+    if (!Number.isFinite(qNum) || !Number.isInteger(qNum)) {
+      // Python float.is_integer
+      if (!Number.isFinite(qNum) || Math.abs(qNum - Math.round(qNum)) > 1e-9) {
+        throw new InputError("Board row " + (index + 1) + " quantity must be a whole number.");
+      }
+    }
+    quantity = Math.trunc(qNum);
+    if (!Number.isFinite(thickness) || thickness <= 0 || !Number.isFinite(width) || width <= 0) {
+      throw new InputError("Board row " + (index + 1) + " thickness and width must be positive.");
+    }
+    if (quantity < 0) {
+      throw new InputError("Board row " + (index + 1) + " quantity cannot be negative.");
+    }
+    requests.push({ thickness, width, quantity, index });
+  });
+  return requests;
+}
+
+function packLog(diameterAcross, diameterVertical, kerf, boards) {
+  diameterAcross = Number(diameterAcross);
+  diameterVertical = Number(diameterVertical);
+  kerf = Number(kerf);
+  if (!Number.isFinite(diameterAcross) || diameterAcross <= 0) {
+    throw new InputError("Diameter across must be a positive number.");
+  }
+  if (!Number.isFinite(diameterVertical) || diameterVertical <= 0) {
+    throw new InputError("Diameter vertical must be a positive number.");
+  }
+  if (!Number.isFinite(kerf) || kerf < 0) {
+    throw new InputError("Kerf must be zero or a positive number.");
+  }
+
+  const requests = asRequests(boards);
+  const a = diameterAcross / 2.0;
+  const b = diameterVertical / 2.0;
+  const spatial = new Spatial();
+  const cache = {};
+  const assigned = {};
+  const rectangles = [];
+
+  const order = requests.slice().sort((p, q) => {
+    const pa = -(p.thickness * p.width);
+    const qa = -(q.thickness * q.width);
+    if (pa < qa) return -1;
+    if (pa > qa) return 1;
+    return p.index - q.index;
+  });
+  const placedByIndex = {};
+  for (const row of requests) placedByIndex[row.index] = 0;
+
+  for (const row of order) {
+    for (let n = 0; n < row.quantity; n++) {
+      const rect = placeOne(spatial, cache, row.thickness, row.width, a, b, kerf);
+      if (rect === null) break;
+      placedByIndex[row.index] += 1;
+      const [x, y, w, h] = rect;
+      const [fill, stroke] = colorFor(row.thickness, row.width, assigned);
+      rectangles.push({
+        x, y, w, h,
+        thickness: row.thickness,
+        width: row.width,
+        label: sizeLabel(row.thickness, row.width),
+        fill, stroke,
+        kind: "request",
+        request_index: row.index,
+      });
+    }
+  }
+
+  const requestedKeys = new Set();
+  const requestResults = [];
+  for (const row of requests) {
+    const placed = placedByIndex[row.index];
+    if (placed > row.quantity) {
+      throw new Error("Placed more boards than requested.");
+    }
+    const [fill, stroke] = colorFor(row.thickness, row.width, assigned);
+    requestResults.push({
+      thickness: row.thickness,
+      width: row.width,
+      quantity: row.quantity,
+      placed,
+      label: sizeLabel(row.thickness, row.width),
+      fill,
+      stroke,
+    });
+    if (row.quantity > 0) requestedKeys.add(sizeKey(row.thickness, row.width));
+  }
+
+  const fillerOrder = COMMON_SIZES.slice().sort((p, q) => {
+    const pa = -(p[0] * p[1]);
+    const qa = -(q[0] * q[1]);
+    if (pa < qa) return -1;
+    if (pa > qa) return 1;
+    const pmin = -Math.min(p[0], p[1]);
+    const qmin = -Math.min(q[0], q[1]);
+    if (pmin < qmin) return -1;
+    if (pmin > qmin) return 1;
+    const pmax = -Math.max(p[0], p[1]);
+    const qmax = -Math.max(q[0], q[1]);
+    if (pmax < qmax) return -1;
+    if (pmax > qmax) return 1;
+    return 0;
+  });
+
+  const fillerResults = [];
+  for (const [thickness, width] of fillerOrder) {
+    if (requestedKeys.has(sizeKey(thickness, width))) continue;
+    let count = 0;
+    while (true) {
+      const rect = placeOne(spatial, cache, thickness, width, a, b, kerf);
+      if (rect === null) break;
+      count += 1;
+      const [x, y, w, h] = rect;
+      const [fill, stroke] = colorFor(thickness, width, assigned);
+      rectangles.push({
+        x, y, w, h,
+        thickness, width,
+        label: sizeLabel(thickness, width),
+        fill, stroke,
+        kind: "filler",
+        request_index: null,
+      });
+      if (count > 400) break;
+    }
+    if (count) {
+      const [fill, stroke] = colorFor(thickness, width, assigned);
+      fillerResults.push({
+        thickness, width,
+        quantity: count,
+        placed: count,
+        label: sizeLabel(thickness, width),
+        fill, stroke,
+      });
+    }
+  }
+
+  return {
+    diameter_across: diameterAcross,
+    diameter_vertical: diameterVertical,
+    kerf,
+    a,
+    b,
+    requests: requestResults,
+    filler: fillerResults,
+    rectangles,
+    note: NOTE,
+  };
+}
+
+function renderSvg(result) {
+  const a = result.a;
+  const b = result.b;
+  const pad = Math.max(0.6, result.kerf + 0.35);
+  const minX = -a - pad;
+  const minY = -b - pad;
+  const width = (a + pad) * 2.0;
+  const height = (b + pad) * 2.0;
+  const parts = [];
+  parts.push(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' +
+      minX.toFixed(4) + " " + minY.toFixed(4) + " " +
+      width.toFixed(4) + " " + height.toFixed(4) +
+      '" role="img" aria-label="Log cross-section with boards">'
+  );
+  parts.push(
+    '<ellipse cx="0" cy="0" rx="' + a.toFixed(4) + '" ry="' + b.toFixed(4) +
+      '" fill="#f7f4ee" stroke="#222" stroke-width="1.25" vector-effect="non-scaling-stroke"/>'
+  );
+  for (const rect of result.rectangles) {
+    const x = rect.x;
+    const y = rect.y;
+    const w = rect.w;
+    const h = rect.h;
+    const svgY = -y - h;
+    parts.push(
+      '<rect x="' + x.toFixed(4) + '" y="' + svgY.toFixed(4) +
+        '" width="' + w.toFixed(4) + '" height="' + h.toFixed(4) +
+        '" fill="' + rect.fill + '" stroke="' + rect.stroke +
+        '" stroke-width="1.25" vector-effect="non-scaling-stroke"/>'
+    );
+    if (w >= 1.45 && h >= 0.7) {
+      const font = Math.min(0.42, h * 0.46, w * 0.22);
+      if (font >= 0.22) {
+        const cx = x + w / 2.0;
+        const cy = -y - h / 2.0;
+        parts.push(
+          '<text x="' + cx.toFixed(4) + '" y="' + cy.toFixed(4) +
+            '" text-anchor="middle" dominant-baseline="middle" font-size="' +
+            font.toFixed(3) + '" font-family="Helvetica, Arial, sans-serif" fill="#2a2a2a">' +
+            rect.label + "</text>"
+        );
+      }
+    }
+  }
+  parts.push("</svg>");
+  return parts.join("");
+}
+
+function resultPayload(result) {
+  const lines = [];
+  for (const row of result.requests) {
+    lines.push({
+      label: row.label,
+      requested: row.quantity,
+      placed: row.placed,
+      filler: false,
+      fill: row.fill,
+      stroke: row.stroke,
+    });
+  }
+  for (const row of result.filler) {
+    lines.push({
+      label: row.label,
+      requested: 0,
+      placed: row.placed,
+      filler: true,
+      fill: row.fill,
+      stroke: row.stroke,
+    });
+  }
+  return {
+    diameter_across: result.diameter_across,
+    diameter_vertical: result.diameter_vertical,
+    kerf: result.kerf,
+    lines,
+    svg: renderSvg(result),
+    note: result.note,
+    board_count: result.rectangles.length,
+    rectangles: result.rectangles.map((r) => ({
+      x: r.x, y: r.y, w: r.w, h: r.h, label: r.label, kind: r.kind,
+    })),
+  };
+}
+
+
+const boards = document.getElementById("boards");
+document.getElementById("add").addEventListener("click", () => {
+  const row = document.createElement("tr");
+  row.innerHTML = '<td><input name="thickness" type="number" min="0" step="any" required inputmode="decimal"></td>'
+    + '<td><input name="width" type="number" min="0" step="any" required inputmode="decimal"></td>'
+    + '<td><input name="quantity" type="number" min="0" step="1" value="1" required inputmode="numeric"></td>'
+    + '<td><button type="button" class="remove">Remove</button></td>';
+  boards.appendChild(row);
+});
+boards.addEventListener("click", (event) => {
+  if (event.target.classList.contains("remove")) {
+    const row = event.target.closest("tr");
+    if (row) row.remove();
+  }
+});
+function showError(message) {
+  const out = document.getElementById("out");
+  out.innerHTML = '<p class="error"></p>';
+  out.querySelector(".error").textContent = message;
+}
+document.getElementById("plan").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const button = document.getElementById("figure");
+  const rows = [...boards.querySelectorAll("tr")].map((row) => ({
+    thickness: Number(row.querySelector('[name="thickness"]').value),
+    width: Number(row.querySelector('[name="width"]').value),
+    quantity: Number(row.querySelector('[name="quantity"]').value)
+  })).filter((row) => Number.isFinite(row.thickness) && Number.isFinite(row.width) && Number.isFinite(row.quantity));
+  button.disabled = true;
+  window.setTimeout(() => {
+    try {
+      const result = packLog(
+        document.getElementById("across").value,
+        document.getElementById("vertical").value,
+        document.getElementById("kerf").value,
+        rows
+      );
+      const data = resultPayload(result);
+      const items = data.lines.map((line) => {
+        const text = line.filler
+          ? line.label + ": " + line.placed + " from leftover"
+          : line.label + ": placed " + line.placed + " of " + line.requested + " requested";
+        return "<li>" + text + "</li>";
+      }).join("");
+      const legend = data.lines.filter((line) => line.placed > 0).map((line) => {
+        return '<li><span class="swatch" style="background:' + line.fill
+          + ";border:2px solid " + line.stroke + '"></span>' + line.label + "</li>";
+      }).join("");
+      const out = document.getElementById("out");
+      out.innerHTML = '<ul class="counts">' + items + "</ul>"
+        + '<div class="diagram">' + data.svg + "</div>"
+        + '<ul class="legend">' + legend + "</ul>";
+    } catch (err) {
+      showError(err instanceof InputError ? err.message : "The planner failed.");
+    } finally {
+      button.disabled = false;
+    }
+  }, 0);
+});
+</script>
+</body>
+</html>
