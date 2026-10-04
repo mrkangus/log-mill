@@ -1,6 +1,6 @@
 # Log mill
 
-A single page that plans boards cut from one elliptical log. Enter the diameter across, the diameter vertical, a common saw kerf shown as a fraction (default 1/8) or a custom inch value, and for each board either a fixed count or “as many as will fit.” Desired sizes are placed in the order entered; leftover wood is filled with other common sizes. Clear resets the form. The layout is a practical search, not a proven optimum.
+A single page that plans boards cut from one elliptical log. Enter the diameter across, the diameter vertical, a common saw kerf shown as a fraction (default 1/8) or a custom inch value, and for each board either a fixed count or “as many as will fit.” Desired sizes are placed in the order entered; leftover wood is filled with other common sizes. Boards fill a solid grid. Each saw cut runs straight across the whole layout, left to right or top to bottom, so no board edge stops in the middle of a neighbor. Clear resets the form. The layout is a practical search, not a proven optimum.
 
 Every cut takes a kerf, including the outer faces, and that kerf band has to lie inside the log.
 

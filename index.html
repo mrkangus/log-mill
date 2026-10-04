@@ -146,7 +146,7 @@
         <button type="submit" id="figure">Figure the cut</button>
         <button type="button" id="clear">Clear</button>
       </div>
-      <p class="limit">Practical 1/8 inch search, not a proven optimum.</p>
+      <p class="limit">Practical 1/8 inch search, not a proven optimum. Each saw cut runs straight across the whole layout.</p>
     </form>
     <section id="out" aria-live="polite">
       <div id="cutSummary">
@@ -172,7 +172,6 @@
 
 const GRID = 0.125;
 const INSIDE_EPS = 1e-9;
-const GAP_EPS = 1e-7;
 
 const COLORS = {
   "2,4": ["#F6E7A8", "#A89860"],
@@ -218,7 +217,7 @@ const COMMON_SIZES = [
   [1.0, 2.0],
 ];
 
-const NOTE = "Practical 1/8 inch search, not a proven optimum.";
+const NOTE = "Practical 1/8 inch search, not a proven optimum. Each saw cut runs straight across the whole layout.";
 
 class InputError extends Error {
   constructor(message) {
@@ -319,105 +318,288 @@ function bandInside(x, y, w, h, a, b, kerf) {
   return true;
 }
 
-function gapsOverlap(ax, ay, aw, ah, bx, by, bw, bh, kerf) {
-  return !(
-    ax + aw + kerf <= bx + GAP_EPS ||
-    bx + bw + kerf <= ax + GAP_EPS ||
-    ay + ah + kerf <= by + GAP_EPS ||
-    by + bh + kerf <= ay + GAP_EPS
-  );
+function sameDim(a, b) {
+  return Math.abs(a - b) <= 1e-6;
 }
 
-function gridValues(lo, hi, step) {
-  const i0 = Math.ceil(lo / step - 1e-9);
-  const i1 = Math.floor(hi / step + 1e-9);
-  const out = [];
-  for (let i = i0; i <= i1; i++) out.push(i * step);
-  return out;
+function pieceFitsAlone(w, h, a, b, kerf) {
+  return bandInside(-w / 2, -h / 2, w, h, a, b, kerf);
 }
 
-class Spatial {
-  constructor(cell = 2.0) {
-    this.cell = cell;
-    this.rects = [];
-    this.buckets = new Map();
-    this.seen = [];
-    this.stamp = 0;
+// Solid row-and-column grid. Every cell is a board, kerf sits between cells
+// and on the outer faces, and both stay inside the ellipse. Horizontal cuts
+// run the full width of the layout and vertical cuts run the full height, so
+// a board edge never stops in the middle of a neighbor.
+function createCutGrid(a, b, kerf) {
+  let cols = [];
+  let rows = [];
+  let occ = [];
+
+  function colOffset(list, index) {
+    let x = 0;
+    for (let i = 0; i < index; i++) x += list[i] + kerf;
+    return x;
   }
 
-  keys(x, y, w, h) {
-    const c = this.cell;
-    const ix0 = Math.floor(x / c);
-    const iy0 = Math.floor(y / c);
-    const ix1 = Math.floor((x + w) / c);
-    const iy1 = Math.floor((y + h) / c);
-    const out = [];
-    for (let iy = iy0; iy <= iy1; iy++) {
-      for (let ix = ix0; ix <= ix1; ix++) out.push(ix + "," + iy);
-    }
-    return out;
+  function snapshot() {
+    return {
+      cols: cols.slice(),
+      rows: rows.slice(),
+      occ: occ.map((row) => row.slice()),
+    };
   }
 
-  add(rect) {
-    const index = this.rects.length;
-    this.rects.push(rect);
-    this.seen.push(0);
-    const [x, y, w, h] = rect;
-    for (const key of this.keys(x, y, w, h)) {
-      let bucket = this.buckets.get(key);
-      if (!bucket) {
-        bucket = [];
-        this.buckets.set(key, bucket);
+  function restore(state) {
+    cols = state.cols.slice();
+    rows = state.rows.slice();
+    occ = state.occ.map((row) => row.slice());
+  }
+
+  function corners(dx, dy, w, h) {
+    return [
+      [dx, dy],
+      [dx + w, dy],
+      [dx, dy + h],
+      [dx + w, dy + h],
+      [dx - kerf, dy - kerf],
+      [dx + w + kerf, dy - kerf],
+      [dx - kerf, dy + h + kerf],
+      [dx + w + kerf, dy + h + kerf],
+    ];
+  }
+
+  function originFits(state, x0, y0) {
+    // Every cell, including ones waiting for filler, is a real board.
+    for (let r = 0; r < state.rows.length; r++) {
+      for (let c = 0; c < state.cols.length; c++) {
+        const x = x0 + colOffset(state.cols, c);
+        const y = y0 + colOffset(state.rows, r);
+        if (!bandInside(x, y, state.cols[c], state.rows[r], a, b, kerf)) return false;
       }
-      bucket.push(index);
     }
+    return true;
   }
 
-  collides(x, y, w, h, kerf) {
-    this.stamp += 1;
-    const stamp = this.stamp;
-    const qx = x - kerf;
-    const qy = y - kerf;
-    const qw = w + 2.0 * kerf;
-    const qh = h + 2.0 * kerf;
-    for (const key of this.keys(qx, qy, qw, qh)) {
-      const bucket = this.buckets.get(key);
-      if (!bucket) continue;
-      for (const index of bucket) {
-        if (this.seen[index] === stamp) continue;
-        this.seen[index] = stamp;
-        const [px, py, pw, ph] = this.rects[index];
-        if (gapsOverlap(x, y, w, h, px, py, pw, ph, kerf)) return true;
+  // Feasible origins lie on the 1/8 inch grid. Among them, prefer the one
+  // that centers the grid in the ellipse.
+  function bestOrigin(state) {
+    const cells = [];
+    for (let r = 0; r < state.rows.length; r++) {
+      for (let c = 0; c < state.cols.length; c++) {
+        cells.push(corners(colOffset(state.cols, c), colOffset(state.rows, r), state.cols[c], state.rows[r]));
       }
+    }
+    if (!cells.length) return { x0: 0, y0: 0, score: 0 };
+
+    const totalW = colOffset(state.cols, state.cols.length - 1) + state.cols[state.cols.length - 1];
+    const totalH = colOffset(state.rows, state.rows.length - 1) + state.rows[state.rows.length - 1];
+    const idealX = -totalW / 2;
+    const idealY = -totalH / 2;
+    const yLo = Math.ceil((-b) / GRID - 1e-9);
+    const yHi = Math.floor(b / GRID + 1e-9);
+    let best = null;
+
+    for (let yi = yLo; yi <= yHi; yi++) {
+      const y0 = yi * GRID;
+      let lo = -Infinity;
+      let hi = Infinity;
+      let ok = true;
+      for (const pts of cells) {
+        for (const [dx, dy] of pts) {
+          const y = y0 + dy;
+          const yy = (y / b) ** 2;
+          if (yy > 1 + 1e-9) { ok = false; break; }
+          const xlim = a * Math.sqrt(Math.max(0, 1 + 1e-9 - yy));
+          const xLo = -xlim - dx;
+          const xHi = xlim - dx;
+          if (xLo > lo) lo = xLo;
+          if (xHi < hi) hi = xHi;
+        }
+        if (!ok || lo > hi + 1e-9) { ok = false; break; }
+      }
+      if (!ok || lo > hi + 1e-9) continue;
+      const i0 = Math.ceil(lo / GRID - 1e-9);
+      const i1 = Math.floor(hi / GRID + 1e-9);
+      if (i0 > i1) continue;
+      let xi = Math.round(idealX / GRID);
+      if (xi < i0) xi = i0;
+      if (xi > i1) xi = i1;
+      // If rounding landed outside, walk to a grid point that really fits.
+      let x0 = null;
+      const order = [xi];
+      for (let step = 1; step <= i1 - i0; step++) {
+        if (xi - step >= i0) order.push(xi - step);
+        if (xi + step <= i1) order.push(xi + step);
+      }
+      for (const candidate of order) {
+        const xTry = candidate * GRID;
+        if (originFits(state, xTry, y0)) { x0 = xTry; break; }
+      }
+      if (x0 === null) continue;
+      const cx = x0 + totalW / 2;
+      const cy = y0 + totalH / 2;
+      const score = cx * cx + cy * cy;
+      const yBias = Math.abs(y0 - idealY);
+      if (!best || score < best.score - 1e-12 || (Math.abs(score - best.score) <= 1e-12 && yBias < best.yBias)) {
+        best = { x0, y0, score, yBias };
+      }
+    }
+    return best;
+  }
+
+  function blankRow(n) {
+    return Array(n).fill(null);
+  }
+
+  function withRow(state, side, h) {
+    const next = {
+      cols: state.cols.slice(),
+      rows: state.rows.slice(),
+      occ: state.occ.map((row) => row.slice()),
+    };
+    if (side === "bottom") {
+      next.rows.unshift(h);
+      next.occ.unshift(blankRow(next.cols.length));
+      return { state: next, r: 0 };
+    }
+    next.rows.push(h);
+    next.occ.push(blankRow(next.cols.length));
+    return { state: next, r: next.rows.length - 1 };
+  }
+
+  function withCol(state, side, w) {
+    const next = {
+      cols: state.cols.slice(),
+      rows: state.rows.slice(),
+      occ: state.occ.map((row) => row.slice()),
+    };
+    if (side === "left") {
+      next.cols.unshift(w);
+      next.occ.forEach((row) => row.unshift(null));
+      return { state: next, c: 0 };
+    }
+    next.cols.push(w);
+    next.occ.forEach((row) => row.push(null));
+    return { state: next, c: next.cols.length - 1 };
+  }
+
+  function better(score, other) {
+    for (let i = 0; i < score.length; i++) {
+      if (score[i] < other[i] - 1e-12) return true;
+      if (score[i] > other[i] + 1e-12) return false;
     }
     return false;
   }
-}
 
-function candidates(w, h, a, b, kerf, step) {
-  const found = [];
-  if (w <= 0 || h <= 0) return found;
-  const ys = gridValues(-b, b, step);
-  const xs = gridValues(-a, a, step);
-  for (const y of ys) {
-    for (const x of xs) {
-      if (bandInside(x, y, w, h, a, b, kerf)) found.push([x, y]);
+  function companionsLegal(state, companionOk) {
+    if (!companionOk) return false;
+    for (let r = 0; r < state.rows.length; r++) {
+      for (let c = 0; c < state.cols.length; c++) {
+        if (state.occ[r][c]) continue;
+        if (!companionOk(state.cols[c], state.rows[r])) return false;
+      }
     }
+    return true;
   }
-  found.sort((p, q) => {
-    const py = -(p[1] + h);
-    const qy = -(q[1] + h);
-    if (py < qy) return -1;
-    if (py > qy) return 1;
-    const pa = Math.abs(p[0] + w / 2.0);
-    const qa = Math.abs(q[0] + w / 2.0);
-    if (pa < qa) return -1;
-    if (pa > qa) return 1;
-    if (p[0] < q[0]) return -1;
-    if (p[0] > q[0]) return 1;
-    return 0;
-  });
-  return found;
+
+  function place(w, h, meta, companionOk) {
+    if (!(w > 0) || !(h > 0)) return false;
+    const base = snapshot();
+    const cands = [];
+    for (let r = 0; r < base.rows.length; r++) {
+      for (let c = 0; c < base.cols.length; c++) {
+        if (!base.occ[r][c] && sameDim(base.cols[c], w) && sameDim(base.rows[r], h)) {
+          cands.push({ kind: "cell", r, c, grow: 0 });
+        }
+      }
+    }
+    for (const side of ["top", "bottom"]) {
+      for (let c = 0; c < base.cols.length; c++) {
+        if (sameDim(base.cols[c], w)) cands.push({ kind: "row", side, c, grow: 1 });
+      }
+    }
+    for (const side of ["left", "right"]) {
+      for (let r = 0; r < base.rows.length; r++) {
+        if (sameDim(base.rows[r], h)) cands.push({ kind: "col", side, r, grow: 1 });
+      }
+    }
+    if (!base.cols.length || !base.rows.length) {
+      cands.push({ kind: "both", sideR: "top", sideC: "left", grow: 2 });
+    } else {
+      for (const sideR of ["top", "bottom"]) {
+        for (const sideC of ["left", "right"]) {
+          cands.push({ kind: "both", sideR, sideC, grow: 2 });
+        }
+      }
+    }
+
+    let best = null;
+    for (const cand of cands) {
+      let state = base;
+      let r;
+      let c;
+      if (cand.kind === "cell") {
+        state = {
+          cols: base.cols.slice(),
+          rows: base.rows.slice(),
+          occ: base.occ.map((row) => row.slice()),
+        };
+        r = cand.r;
+        c = cand.c;
+      } else if (cand.kind === "row") {
+        const added = withRow(base, cand.side, h);
+        state = added.state;
+        r = added.r;
+        c = cand.c;
+      } else if (cand.kind === "col") {
+        const added = withCol(base, cand.side, w);
+        state = added.state;
+        c = added.c;
+        r = cand.r;
+      } else {
+        const addedRow = withRow(base, cand.sideR, h);
+        const addedCol = withCol(addedRow.state, cand.sideC, w);
+        state = addedCol.state;
+        r = addedRow.r;
+        c = addedCol.c;
+      }
+      state.occ[r][c] = meta;
+      if (!companionsLegal(state, companionOk)) continue;
+      const origin = bestOrigin(state);
+      if (!origin) continue;
+      const top = origin.y0 + colOffset(state.rows, r) + h;
+      const score = [cand.grow, origin.score, -top, r, c];
+      if (!best || better(score, best.score)) {
+        best = { score, state };
+      }
+    }
+    if (!best) return false;
+    restore(best.state);
+    return true;
+  }
+
+  function emit() {
+    const state = snapshot();
+    const origin = bestOrigin(state) || { x0: 0, y0: 0 };
+    const out = [];
+    for (let r = 0; r < state.rows.length; r++) {
+      for (let c = 0; c < state.cols.length; c++) {
+        const meta = state.occ[r][c];
+        if (!meta) continue;
+        out.push({
+          x: origin.x0 + colOffset(state.cols, c),
+          y: origin.y0 + colOffset(state.rows, r),
+          w: state.cols[c],
+          h: state.rows[r],
+          meta,
+        });
+      }
+    }
+    out.sort((p, q) => p.meta.seq - q.meta.seq);
+    return out;
+  }
+
+  return { place, emit };
 }
 
 function orientations(thickness, width) {
@@ -438,23 +620,6 @@ function orientations(thickness, width) {
     unique.push(item);
   }
   return unique;
-}
-
-function placeOne(spatial, cache, thickness, width, a, b, kerf) {
-  for (const [ow, oh] of orientations(thickness, width)) {
-    const key = pyRound(ow, 6) + "," + pyRound(oh, 6) + "," + pyRound(kerf, 6);
-    if (!Object.prototype.hasOwnProperty.call(cache, key)) {
-      cache[key] = candidates(ow, oh, a, b, kerf, GRID);
-    }
-    for (const [x, y] of cache[key]) {
-      if (!spatial.collides(x, y, ow, oh, kerf)) {
-        const rect = [x, y, ow, oh];
-        spatial.add(rect);
-        return rect;
-      }
-    }
-  }
-  return null;
 }
 
 function asRequests(boards) {
@@ -532,32 +697,47 @@ function packLog(diameterAcross, diameterVertical, kerf, boards) {
   const requests = asRequests(boards);
   const a = diameterAcross / 2.0;
   const b = diameterVertical / 2.0;
-  const spatial = new Spatial();
-  const cache = {};
+  const grid = createCutGrid(a, b, kerf);
   const assigned = {};
-  const rectangles = [];
+  let seq = 0;
 
-  // Place desired sizes in the order entered (top to bottom).
   const placedByIndex = {};
   for (const row of requests) placedByIndex[row.index] = 0;
+
+  function placeSize(thickness, width, meta, companionOk) {
+    for (const [ow, oh] of orientations(thickness, width)) {
+      if (!pieceFitsAlone(ow, oh, a, b, kerf)) continue;
+      if (grid.place(ow, oh, meta, companionOk)) return true;
+    }
+    return false;
+  }
+
+  const commonKeys = new Set(COMMON_SIZES.map(([t, w]) => sizeKey(t, w)));
+  const requestKeys = new Set();
+  for (const row of requests) {
+    if (row.maximize || row.quantity > 0) requestKeys.add(sizeKey(row.thickness, row.width));
+  }
+  // A gap left beside a new board has to be a filler size, not another
+  // requested size and not a partial hole. That keeps every cut full-span.
+  function fillerCompanion(w, h) {
+    const key = sizeKey(w, h);
+    if (requestKeys.has(key)) return false;
+    return commonKeys.has(key);
+  }
 
   for (const row of requests) {
     const limit = row.maximize ? 400 : row.quantity;
     for (let n = 0; n < limit; n++) {
-      const rect = placeOne(spatial, cache, row.thickness, row.width, a, b, kerf);
-      if (rect === null) break;
-      placedByIndex[row.index] += 1;
-      const [x, y, w, h] = rect;
-      const [fill, stroke] = colorFor(row.thickness, row.width, assigned);
-      rectangles.push({
-        x, y, w, h,
+      const meta = {
+        seq: seq + 1,
         thickness: row.thickness,
         width: row.width,
-        label: sizeLabel(row.thickness, row.width),
-        fill, stroke,
         kind: "request",
         request_index: row.index,
-      });
+      };
+      if (!placeSize(row.thickness, row.width, meta, fillerCompanion)) break;
+      seq += 1;
+      placedByIndex[row.index] += 1;
     }
   }
 
@@ -598,36 +778,73 @@ function packLog(diameterAcross, diameterVertical, kerf, boards) {
     return 0;
   });
 
-  const fillerResults = [];
-  for (const [thickness, width] of fillerOrder) {
-    if (requestedKeys.has(sizeKey(thickness, width))) continue;
+  const fillerRank = new Map();
+  fillerOrder.forEach(([thickness, width], index) => {
+    const key = sizeKey(thickness, width);
+    if (!fillerRank.has(key)) fillerRank.set(key, index);
+  });
+
+  const fillerCounts = new Map();
+  for (let index = 0; index < fillerOrder.length; index++) {
+    const [thickness, width] = fillerOrder[index];
+    const key = sizeKey(thickness, width);
+    if (requestedKeys.has(key)) continue;
+    // Companions may be this size or a smaller filler still ahead in the list.
+    function companionOk(w, h) {
+      const cellKey = sizeKey(w, h);
+      if (requestKeys.has(cellKey) || !commonKeys.has(cellKey)) return false;
+      const rank = fillerRank.get(cellKey);
+      return rank !== undefined && rank >= index;
+    }
     let count = 0;
-    while (true) {
-      const rect = placeOne(spatial, cache, thickness, width, a, b, kerf);
-      if (rect === null) break;
-      count += 1;
-      const [x, y, w, h] = rect;
-      const [fill, stroke] = colorFor(thickness, width, assigned);
-      rectangles.push({
-        x, y, w, h,
-        thickness, width,
-        label: sizeLabel(thickness, width),
-        fill, stroke,
+    while (count < 400) {
+      const meta = {
+        seq: seq + 1,
+        thickness,
+        width,
         kind: "filler",
         request_index: null,
-      });
-      if (count > 400) break;
+      };
+      if (!placeSize(thickness, width, meta, companionOk)) break;
+      seq += 1;
+      count += 1;
     }
-    if (count) {
-      const [fill, stroke] = colorFor(thickness, width, assigned);
-      fillerResults.push({
-        thickness, width,
-        quantity: count,
-        placed: count,
-        label: sizeLabel(thickness, width),
-        fill, stroke,
-      });
-    }
+    if (count) fillerCounts.set(key, { thickness, width, count });
+  }
+
+  const rectangles = [];
+  for (const cell of grid.emit()) {
+    const meta = cell.meta;
+    const [fill, stroke] = colorFor(meta.thickness, meta.width, assigned);
+    rectangles.push({
+      x: cell.x,
+      y: cell.y,
+      w: cell.w,
+      h: cell.h,
+      thickness: meta.thickness,
+      width: meta.width,
+      label: sizeLabel(meta.thickness, meta.width),
+      fill,
+      stroke,
+      kind: meta.kind,
+      request_index: meta.request_index,
+    });
+  }
+
+  const fillerResults = [];
+  for (const [thickness, width] of fillerOrder) {
+    const found = fillerCounts.get(sizeKey(thickness, width));
+    if (!found) continue;
+    const [fill, stroke] = colorFor(thickness, width, assigned);
+    fillerResults.push({
+      thickness,
+      width,
+      quantity: found.count,
+      placed: found.count,
+      label: sizeLabel(thickness, width),
+      fill,
+      stroke,
+    });
   }
 
   return {
