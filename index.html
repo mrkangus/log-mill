@@ -146,7 +146,7 @@
         <button type="submit" id="figure">Figure the cut</button>
         <button type="button" id="clear">Clear</button>
       </div>
-      <p class="limit">Practical 1/8 inch search, not a proven optimum. Each saw cut runs straight across the whole layout.</p>
+      <p class="limit">Practical search, not a proven optimum. Each saw cut is one straight kerf across the current piece only.</p>
     </form>
     <section id="out" aria-live="polite">
       <div id="cutSummary">
@@ -217,7 +217,7 @@ const COMMON_SIZES = [
   [1.0, 2.0],
 ];
 
-const NOTE = "Practical 1/8 inch search, not a proven optimum. Each saw cut runs straight across the whole layout.";
+const NOTE = "Practical search, not a proven optimum. Each saw cut is one straight kerf across the current piece only.";
 
 class InputError extends Error {
   constructor(message) {
@@ -304,302 +304,503 @@ function corners(x, y, w, h) {
   ];
 }
 
-function bandInside(x, y, w, h, a, b, kerf) {
-  const ox = x - kerf;
-  const oy = y - kerf;
-  const ow = w + 2.0 * kerf;
-  const oh = h + 2.0 * kerf;
-  for (const [px, py] of corners(x, y, w, h)) {
-    if (!pointInside(px, py, a, b)) return false;
-  }
-  for (const [px, py] of corners(ox, oy, ow, oh)) {
-    if (!pointInside(px, py, a, b)) return false;
+function rectInside(x, y, w, h, a, b) {
+  if (w < -1e-9 || h < -1e-9) return false;
+  const pts = corners(x, y, Math.max(w, 0), Math.max(h, 0));
+  for (let i = 0; i < pts.length; i++) {
+    if (!pointInside(pts[i][0], pts[i][1], a, b)) return false;
   }
   return true;
 }
 
-function sameDim(a, b) {
-  return Math.abs(a - b) <= 1e-6;
+function overlapArea(a, b) {
+  return a.x < b.x + b.w - 1e-9 &&
+    b.x < a.x + a.w - 1e-9 &&
+    a.y < b.y + b.h - 1e-9 &&
+    b.y < a.y + a.h - 1e-9;
 }
 
-function pieceFitsAlone(w, h, a, b, kerf) {
-  return bandInside(-w / 2, -h / 2, w, h, a, b, kerf);
+function containsRect(outer, inner) {
+  return outer.x <= inner.x + 1e-9 &&
+    outer.y <= inner.y + 1e-9 &&
+    outer.x + outer.w >= inner.x + inner.w - 1e-9 &&
+    outer.y + outer.h >= inner.y + inner.h - 1e-9;
 }
 
-// Solid row-and-column grid. Every cell is a board, kerf sits between cells
-// and on the outer faces, and both stay inside the ellipse. Horizontal cuts
-// run the full width of the layout and vertical cuts run the full height, so
-// a board edge never stops in the middle of a neighbor.
-function createCutGrid(a, b, kerf) {
-  let cols = [];
-  let rows = [];
-  let occ = [];
+// Sequential guillotine. The saw only cuts the current rectangular piece,
+// edge to edge. A finished board is a leaf: later kerfs may separate leftover
+// wood along its side, but they never cross it or change its size.
+function createSaw(a, b, kerf) {
+  const SIDES = ["left", "right", "top", "bottom"];
+  let roots = [];
+  let seq = 0;
+  let nextId = 1;
 
-  function colOffset(list, index) {
-    let x = 0;
-    for (let i = 0; i < index; i++) x += list[i] + kerf;
-    return x;
+  function newId() {
+    const id = "piece-" + nextId;
+    nextId += 1;
+    return id;
   }
 
   function snapshot() {
-    return {
-      cols: cols.slice(),
-      rows: rows.slice(),
-      occ: occ.map((row) => row.slice()),
-    };
+    return JSON.parse(JSON.stringify({ roots, seq, nextId }));
   }
 
   function restore(state) {
-    cols = state.cols.slice();
-    rows = state.rows.slice();
-    occ = state.occ.map((row) => row.slice());
+    roots = state.roots;
+    seq = state.seq;
+    nextId = state.nextId;
   }
 
-  function corners(dx, dy, w, h) {
-    return [
-      [dx, dy],
-      [dx + w, dy],
-      [dx, dy + h],
-      [dx + w, dy + h],
-      [dx - kerf, dy - kerf],
-      [dx + w + kerf, dy - kerf],
-      [dx - kerf, dy + h + kerf],
-      [dx + w + kerf, dy + h + kerf],
-    ];
-  }
-
-  function originFits(state, x0, y0) {
-    // Every cell, including ones waiting for filler, is a real board.
-    for (let r = 0; r < state.rows.length; r++) {
-      for (let c = 0; c < state.cols.length; c++) {
-        const x = x0 + colOffset(state.cols, c);
-        const y = y0 + colOffset(state.rows, r);
-        if (!bandInside(x, y, state.cols[c], state.rows[r], a, b, kerf)) return false;
+  function eachNode(fn) {
+    function walk(node) {
+      if (!node) return;
+      fn(node);
+      if (node.type === "split") {
+        walk(node.a);
+        walk(node.b);
       }
+    }
+    for (let i = 0; i < roots.length; i++) walk(roots[i]);
+  }
+
+  function eachOccupied(fn) {
+    eachNode((node) => {
+      if (node.type === "board") fn(node, "board");
+      if (node.type === "split" && node.kerf) fn(node.kerf, "kerf");
+      if (!node.opening) return;
+      for (let i = 0; i < SIDES.length; i++) {
+        const spec = node.opening[SIDES[i]];
+        if (spec && spec.rect && spec.rect.w > 1e-12 && spec.rect.h > 1e-12) fn(spec.rect, "kerf");
+      }
+    });
+  }
+
+  function hitsOccupied(rect) {
+    if (rect.w <= 1e-12 || rect.h <= 1e-12) return false;
+    let hit = false;
+    eachOccupied((other) => {
+      if (!hit && overlapArea(rect, other)) hit = true;
+    });
+    return hit;
+  }
+
+  function bandFor(side, x, y, w, h) {
+    if (side === "left") return { x: x - kerf, y, w: kerf, h };
+    if (side === "right") return { x: x + w, y, w: kerf, h };
+    if (side === "top") return { x, y: y + h, w, h: kerf };
+    return { x, y: y - kerf, w, h: kerf };
+  }
+
+  function kerfCoversBand(band) {
+    if (kerf <= 1e-12) return true;
+    let found = false;
+    eachOccupied((rect, kind) => {
+      if (kind === "kerf" && containsRect(rect, band)) found = true;
+    });
+    return found;
+  }
+
+  function stackPlan(x, y, bw, bh, n) {
+    const rects = [];
+    const totalH = n * bh + (n - 1) * kerf;
+    for (let i = 0; i < n; i++) {
+      rects.push({ x, y: y + i * (bh + kerf), w: bw, h: bh });
+    }
+    for (let i = 0; i < n - 1; i++) {
+      rects.push({ x, y: y + (i + 1) * bh + i * kerf, w: bw, h: kerf });
+    }
+    if (kerf > 1e-12) {
+      rects.push({ x: x - kerf, y, w: kerf, h: totalH });
+      rects.push({ x: x + bw, y, w: kerf, h: totalH });
+      rects.push({ x, y: y + totalH, w: bw, h: kerf });
+      rects.push({ x, y: y - kerf, w: bw, h: kerf });
+    }
+    return rects;
+  }
+
+  function rowPlan(x, y, bw, bh, n) {
+    const rects = [];
+    const totalW = n * bw + (n - 1) * kerf;
+    for (let i = 0; i < n; i++) {
+      rects.push({ x: x + i * (bw + kerf), y, w: bw, h: bh });
+    }
+    for (let i = 0; i < n - 1; i++) {
+      rects.push({ x: x + (i + 1) * bw + i * kerf, y, w: kerf, h: bh });
+    }
+    if (kerf > 1e-12) {
+      rects.push({ x: x - kerf, y, w: kerf, h: bh });
+      rects.push({ x: x + totalW, y, w: kerf, h: bh });
+      rects.push({ x, y: y + bh, w: totalW, h: kerf });
+      rects.push({ x, y: y - kerf, w: totalW, h: kerf });
+    }
+    return rects;
+  }
+
+  function planFits(rects) {
+    for (let i = 0; i < rects.length; i++) {
+      const r = rects[i];
+      if (r.w <= 1e-12 || r.h <= 1e-12) continue;
+      if (!rectInside(r.x, r.y, r.w, r.h, a, b)) return false;
+      if (hitsOccupied(r)) return false;
     }
     return true;
   }
 
-  // Feasible origins lie on the 1/8 inch grid. Among them, prefer the one
-  // that centers the grid in the ellipse.
-  function bestOrigin(state) {
-    const cells = [];
-    for (let r = 0; r < state.rows.length; r++) {
-      for (let c = 0; c < state.cols.length; c++) {
-        cells.push(corners(colOffset(state.cols, c), colOffset(state.rows, r), state.cols[c], state.rows[r]));
-      }
+  function makeMeta(thickness, width, kind, requestIndex) {
+    seq += 1;
+    return {
+      seq,
+      thickness,
+      width,
+      kind,
+      request_index: requestIndex,
+    };
+  }
+
+  function stackNode(x, y, bw, bh, n, thickness, width, kind, requestIndex) {
+    if (n === 1) {
+      return {
+        type: "board",
+        id: newId(),
+        x, y, w: bw, h: bh,
+        meta: makeMeta(thickness, width, kind, requestIndex),
+      };
     }
-    if (!cells.length) return { x0: 0, y0: 0, score: 0 };
+    const bottom = {
+      type: "board",
+      id: newId(),
+      x, y, w: bw, h: bh,
+      meta: makeMeta(thickness, width, kind, requestIndex),
+    };
+    const top = stackNode(x, y + bh + kerf, bw, bh, n - 1, thickness, width, kind, requestIndex);
+    const totalH = n * bh + (n - 1) * kerf;
+    return {
+      type: "split",
+      id: newId(),
+      x, y, w: bw, h: totalH,
+      orient: "h",
+      kerf: { x, y: y + bh, w: bw, h: kerf },
+      a: bottom,
+      b: top,
+    };
+  }
 
-    const totalW = colOffset(state.cols, state.cols.length - 1) + state.cols[state.cols.length - 1];
-    const totalH = colOffset(state.rows, state.rows.length - 1) + state.rows[state.rows.length - 1];
-    const idealX = -totalW / 2;
-    const idealY = -totalH / 2;
-    const yLo = Math.ceil((-b) / GRID - 1e-9);
-    const yHi = Math.floor(b / GRID + 1e-9);
-    let best = null;
+  function rowNode(x, y, bw, bh, n, thickness, width, kind, requestIndex) {
+    if (n === 1) {
+      return {
+        type: "board",
+        id: newId(),
+        x, y, w: bw, h: bh,
+        meta: makeMeta(thickness, width, kind, requestIndex),
+      };
+    }
+    const left = {
+      type: "board",
+      id: newId(),
+      x, y, w: bw, h: bh,
+      meta: makeMeta(thickness, width, kind, requestIndex),
+    };
+    const right = rowNode(x + bw + kerf, y, bw, bh, n - 1, thickness, width, kind, requestIndex);
+    const totalW = n * bw + (n - 1) * kerf;
+    return {
+      type: "split",
+      id: newId(),
+      x, y, w: totalW, h: bh,
+      orient: "v",
+      kerf: { x: x + bw, y, w: kerf, h: bh },
+      a: left,
+      b: right,
+    };
+  }
 
-    for (let yi = yLo; yi <= yHi; yi++) {
-      const y0 = yi * GRID;
-      let lo = -Infinity;
-      let hi = Infinity;
-      let ok = true;
-      for (const pts of cells) {
-        for (const [dx, dy] of pts) {
-          const y = y0 + dy;
-          const yy = (y / b) ** 2;
-          if (yy > 1 + 1e-9) { ok = false; break; }
-          const xlim = a * Math.sqrt(Math.max(0, 1 + 1e-9 - yy));
-          const xLo = -xlim - dx;
-          const xHi = xlim - dx;
-          if (xLo > lo) lo = xLo;
-          if (xHi < hi) hi = xHi;
-        }
-        if (!ok || lo > hi + 1e-9) { ok = false; break; }
-      }
-      if (!ok || lo > hi + 1e-9) continue;
-      const i0 = Math.ceil(lo / GRID - 1e-9);
-      const i1 = Math.floor(hi / GRID + 1e-9);
-      if (i0 > i1) continue;
-      let xi = Math.round(idealX / GRID);
-      if (xi < i0) xi = i0;
-      if (xi > i1) xi = i1;
-      // If rounding landed outside, walk to a grid point that really fits.
-      let x0 = null;
-      const order = [xi];
-      for (let step = 1; step <= i1 - i0; step++) {
-        if (xi - step >= i0) order.push(xi - step);
-        if (xi + step <= i1) order.push(xi + step);
-      }
-      for (const candidate of order) {
-        const xTry = candidate * GRID;
-        if (originFits(state, xTry, y0)) { x0 = xTry; break; }
-      }
-      if (x0 === null) continue;
-      const cx = x0 + totalW / 2;
-      const cy = y0 + totalH / 2;
-      const score = cx * cx + cy * cy;
-      const yBias = Math.abs(y0 - idealY);
-      if (!best || score < best.score - 1e-12 || (Math.abs(score - best.score) <= 1e-12 && yBias < best.yBias)) {
-        best = { x0, y0, score, yBias };
-      }
+  function addOpening(node) {
+    if (kerf <= 1e-12) {
+      node.opening = null;
+      return;
+    }
+    node.opening = {
+      left: { rect: { x: node.x - kerf, y: node.y, w: kerf, h: node.h } },
+      right: { rect: { x: node.x + node.w, y: node.y, w: kerf, h: node.h } },
+      top: { rect: { x: node.x, y: node.y + node.h, w: node.w, h: kerf } },
+      bottom: { rect: { x: node.x, y: node.y - kerf, w: node.w, h: kerf } },
+    };
+  }
+
+  function commitPlan(node) {
+    addOpening(node);
+    roots.push(node);
+    return node;
+  }
+
+  function maxCentered(bw, bh, limit, mode) {
+    let best = 0;
+    const cap = Math.min(limit, 80);
+    for (let n = 1; n <= cap; n++) {
+      const span = n * (mode === "stack" ? bh : bw) + (n - 1) * kerf;
+      const cross = mode === "stack" ? bw : bh;
+      const x = mode === "stack" ? -bw / 2 : -span / 2;
+      const y = mode === "stack" ? -span / 2 : -bh / 2;
+      const rects = mode === "stack"
+        ? stackPlan(x, y, bw, bh, n)
+        : rowPlan(x, y, bw, bh, n);
+      if (!planFits(rects)) break;
+      best = n;
     }
     return best;
   }
 
-  function blankRow(n) {
-    return Array(n).fill(null);
+  function placeCentered(bw, bh, n, thickness, width, kind, requestIndex, mode) {
+    if (n <= 0) return;
+    const span = n * (mode === "stack" ? bh : bw) + (n - 1) * kerf;
+    const x = mode === "stack" ? -bw / 2 : -span / 2;
+    const y = mode === "stack" ? -span / 2 : -bh / 2;
+    const node = mode === "stack"
+      ? stackNode(x, y, bw, bh, n, thickness, width, kind, requestIndex)
+      : rowNode(x, y, bw, bh, n, thickness, width, kind, requestIndex);
+    commitPlan(node);
   }
 
-  function withRow(state, side, h) {
-    const next = {
-      cols: state.cols.slice(),
-      rows: state.rows.slice(),
-      occ: state.occ.map((row) => row.slice()),
-    };
-    if (side === "bottom") {
-      next.rows.unshift(h);
-      next.occ.unshift(blankRow(next.cols.length));
-      return { state: next, r: 0 };
+  function openingForSingle(x, y, w, h) {
+    const opening = {};
+    for (let i = 0; i < SIDES.length; i++) {
+      const side = SIDES[i];
+      const band = bandFor(side, x, y, w, h);
+      if (kerf <= 1e-12 || kerfCoversBand(band)) {
+        opening[side] = { shared: true };
+      } else {
+        opening[side] = { rect: band };
+      }
     }
-    next.rows.push(h);
-    next.occ.push(blankRow(next.cols.length));
-    return { state: next, r: next.rows.length - 1 };
+    return opening;
   }
 
-  function withCol(state, side, w) {
-    const next = {
-      cols: state.cols.slice(),
-      rows: state.rows.slice(),
-      occ: state.occ.map((row) => row.slice()),
-    };
-    if (side === "left") {
-      next.cols.unshift(w);
-      next.occ.forEach((row) => row.unshift(null));
-      return { state: next, c: 0 };
+  function singleFits(x, y, w, h) {
+    if (!rectInside(x, y, w, h, a, b)) return false;
+    if (hitsOccupied({ x, y, w, h })) return false;
+    if (kerf <= 1e-12) return true;
+    const opening = openingForSingle(x, y, w, h);
+    for (let i = 0; i < SIDES.length; i++) {
+      const spec = opening[SIDES[i]];
+      if (!spec.rect) continue;
+      const r = spec.rect;
+      if (!rectInside(r.x, r.y, r.w, r.h, a, b)) return false;
+      if (hitsOccupied(r)) return false;
     }
-    next.cols.push(w);
-    next.occ.forEach((row) => row.push(null));
-    return { state: next, c: next.cols.length - 1 };
+    return true;
   }
 
-  function better(score, other) {
-    for (let i = 0; i < score.length; i++) {
-      if (score[i] < other[i] - 1e-12) return true;
-      if (score[i] > other[i] + 1e-12) return false;
+  function dist2(x, y, w, h) {
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    return cx * cx + cy * cy;
+  }
+
+  function betterSpot(aSpot, bSpot) {
+    if (aSpot.score < bSpot.score - 1e-9) return true;
+    if (bSpot.score < aSpot.score - 1e-9) return false;
+    if (aSpot.y < bSpot.y - 1e-9) return true;
+    if (bSpot.y < aSpot.y - 1e-9) return false;
+    return aSpot.x < bSpot.x;
+  }
+
+  function flushSpots(bw, bh) {
+    const spots = [];
+    const seen = new Set();
+    function add(x, y) {
+      const key = pyRound(x, 6) + "," + pyRound(y, 6);
+      if (seen.has(key)) return;
+      seen.add(key);
+      spots.push({ x, y, score: dist2(x, y, bw, bh) });
+    }
+    eachOccupied((rect, kind) => {
+      if (kind !== "kerf") return;
+      const vertical = rect.w <= kerf + 1e-6 && rect.h + 1e-9 >= bh;
+      const horizontal = rect.h <= kerf + 1e-6 && rect.w + 1e-9 >= bw;
+      if (vertical) {
+        const yMin = rect.y;
+        const yMax = rect.y + rect.h - bh;
+        const ys = [yMin, yMax, rect.y + (rect.h - bh) / 2];
+        for (let i = 0; i < ys.length; i++) {
+          const y = ys[i];
+          if (y < yMin - 1e-9 || y > yMax + 1e-9) continue;
+          add(rect.x + rect.w, y);
+          add(rect.x - bw, y);
+        }
+      }
+      if (horizontal) {
+        const xMin = rect.x;
+        const xMax = rect.x + rect.w - bw;
+        const xs = [xMin, xMax, rect.x + (rect.w - bw) / 2];
+        for (let i = 0; i < xs.length; i++) {
+          const x = xs[i];
+          if (x < xMin - 1e-9 || x > xMax + 1e-9) continue;
+          add(x, rect.y + rect.h);
+          add(x, rect.y - bh);
+        }
+      }
+    });
+    return spots;
+  }
+
+  function gridSpots(bw, bh) {
+    const spots = [];
+    const xLo = Math.ceil((-a) / GRID - 1e-9);
+    const xHi = Math.floor((a - bw) / GRID + 1e-9);
+    const yLo = Math.ceil((-b) / GRID - 1e-9);
+    const yHi = Math.floor((b - bh) / GRID + 1e-9);
+    for (let j = yLo; j <= yHi; j++) {
+      const y = j * GRID;
+      for (let i = xLo; i <= xHi; i++) {
+        const x = i * GRID;
+        spots.push({ x, y, score: dist2(x, y, bw, bh) });
+      }
+    }
+    return spots;
+  }
+
+  function bestSpot(bw, bh, spots) {
+    let best = null;
+    for (let i = 0; i < spots.length; i++) {
+      const spot = spots[i];
+      if (!singleFits(spot.x, spot.y, bw, bh)) continue;
+      if (!best || betterSpot(spot, best)) best = spot;
+    }
+    return best;
+  }
+
+  function commitSingle(x, y, bw, bh, thickness, width, kind, requestIndex) {
+    const node = {
+      type: "board",
+      id: newId(),
+      x, y, w: bw, h: bh,
+      meta: makeMeta(thickness, width, kind, requestIndex),
+      opening: openingForSingle(x, y, bw, bh),
+    };
+    roots.push(node);
+    return node;
+  }
+
+  function placeOne(bw, bh, thickness, width, kind, requestIndex) {
+    const flush = bestSpot(bw, bh, flushSpots(bw, bh));
+    if (flush) {
+      commitSingle(flush.x, flush.y, bw, bh, thickness, width, kind, requestIndex);
+      return true;
+    }
+    const grid = bestSpot(bw, bh, gridSpots(bw, bh));
+    if (grid) {
+      commitSingle(grid.x, grid.y, bw, bh, thickness, width, kind, requestIndex);
+      return true;
     }
     return false;
   }
 
-  function companionsLegal(state, companionOk) {
-    if (!companionOk) return false;
-    for (let r = 0; r < state.rows.length; r++) {
-      for (let c = 0; c < state.cols.length; c++) {
-        if (state.occ[r][c]) continue;
-        if (!companionOk(state.cols[c], state.rows[r])) return false;
-      }
-    }
-    return true;
+  function countBoards() {
+    let n = 0;
+    eachNode((node) => {
+      if (node.type === "board") n += 1;
+    });
+    return n;
   }
 
-  function place(w, h, meta, companionOk) {
-    if (!(w > 0) || !(h > 0)) return false;
+  function scoreAll() {
+    let score = 0;
+    eachNode((node) => {
+      if (node.type !== "board") return;
+      score += dist2(node.x, node.y, node.w, node.h);
+    });
+    return score;
+  }
+
+  function placeUpTo(thickness, width, limit, kind, requestIndex, quick) {
+    if (!(limit > 0)) return 0;
+    const orients = orientations(thickness, width);
     const base = snapshot();
-    const cands = [];
-    for (let r = 0; r < base.rows.length; r++) {
-      for (let c = 0; c < base.cols.length; c++) {
-        if (!base.occ[r][c] && sameDim(base.cols[c], w) && sameDim(base.rows[r], h)) {
-          cands.push({ kind: "cell", r, c, grow: 0 });
-        }
-      }
-    }
-    for (const side of ["top", "bottom"]) {
-      for (let c = 0; c < base.cols.length; c++) {
-        if (sameDim(base.cols[c], w)) cands.push({ kind: "row", side, c, grow: 1 });
-      }
-    }
-    for (const side of ["left", "right"]) {
-      for (let r = 0; r < base.rows.length; r++) {
-        if (sameDim(base.rows[r], h)) cands.push({ kind: "col", side, r, grow: 1 });
-      }
-    }
-    if (!base.cols.length || !base.rows.length) {
-      cands.push({ kind: "both", sideR: "top", sideC: "left", grow: 2 });
-    } else {
-      for (const sideR of ["top", "bottom"]) {
-        for (const sideC of ["left", "right"]) {
-          cands.push({ kind: "both", sideR, sideC, grow: 2 });
-        }
+    let best = null;
+
+    function consider() {
+      const placed = countBoards() - baseCount;
+      const score = scoreAll();
+      const state = snapshot();
+      const nRoots = roots.length;
+      if (!best || placed > best.placed + 1e-9 ||
+          (placed === best.placed && score < best.score - 1e-9) ||
+          (placed === best.placed && Math.abs(score - best.score) <= 1e-9 && nRoots < best.roots)) {
+        best = { placed, score, state, roots: nRoots };
       }
     }
 
-    let best = null;
-    for (const cand of cands) {
-      let state = base;
-      let r;
-      let c;
-      if (cand.kind === "cell") {
-        state = {
-          cols: base.cols.slice(),
-          rows: base.rows.slice(),
-          occ: base.occ.map((row) => row.slice()),
-        };
-        r = cand.r;
-        c = cand.c;
-      } else if (cand.kind === "row") {
-        const added = withRow(base, cand.side, h);
-        state = added.state;
-        r = added.r;
-        c = cand.c;
-      } else if (cand.kind === "col") {
-        const added = withCol(base, cand.side, w);
-        state = added.state;
-        c = added.c;
-        r = cand.r;
-      } else {
-        const addedRow = withRow(base, cand.sideR, h);
-        const addedCol = withCol(addedRow.state, cand.sideC, w);
-        state = addedCol.state;
-        r = addedRow.r;
-        c = addedCol.c;
+    const baseCount = countBoards();
+    // Greedy singles only, then each centered stack or row plus slabs sawn off it.
+    restore(base);
+    let guard = 0;
+    while (countBoards() - baseCount < limit && guard < limit) {
+      guard += 1;
+      const before = snapshot();
+      const have = countBoards();
+      let picked = null;
+      for (let i = 0; i < orients.length; i++) {
+        restore(before);
+        const bw = orients[i][0];
+        const bh = orients[i][1];
+        if (placeOne(bw, bh, thickness, width, kind, requestIndex)) {
+          const score = scoreAll();
+          const state = snapshot();
+          if (!picked || score < picked.score - 1e-9) picked = { score, state };
+        }
       }
-      state.occ[r][c] = meta;
-      if (!companionsLegal(state, companionOk)) continue;
-      const origin = bestOrigin(state);
-      if (!origin) continue;
-      const top = origin.y0 + colOffset(state.rows, r) + h;
-      const score = [cand.grow, origin.score, -top, r, c];
-      if (!best || better(score, best.score)) {
-        best = { score, state };
+      if (!picked) break;
+      restore(picked.state);
+      if (countBoards() === have) break;
+    }
+    consider();
+
+    if (!quick) for (let i = 0; i < orients.length; i++) {
+      const bw = orients[i][0];
+      const bh = orients[i][1];
+      for (let mode = 0; mode < 2; mode++) {
+        const which = mode === 0 ? "stack" : "row";
+        restore(base);
+        const n = maxCentered(bw, bh, limit, which);
+        if (n > 0) {
+          placeCentered(bw, bh, n, thickness, width, kind, requestIndex, which);
+        }
+        let guard2 = 0;
+        while (countBoards() - baseCount < limit && guard2 < limit) {
+          guard2 += 1;
+          const before = snapshot();
+          const have = countBoards();
+          let picked = null;
+          for (let k = 0; k < orients.length; k++) {
+            restore(before);
+            if (placeOne(orients[k][0], orients[k][1], thickness, width, kind, requestIndex)) {
+              const score = scoreAll();
+              const state = snapshot();
+              if (!picked || score < picked.score - 1e-9) picked = { score, state };
+            }
+          }
+          if (!picked) break;
+          restore(picked.state);
+          if (countBoards() === have) break;
+        }
+        consider();
       }
     }
-    if (!best) return false;
+
     restore(best.state);
-    return true;
+    return best.placed;
   }
 
-  function emit() {
-    const state = snapshot();
-    const origin = bestOrigin(state) || { x0: 0, y0: 0 };
+  function leaves() {
     const out = [];
-    for (let r = 0; r < state.rows.length; r++) {
-      for (let c = 0; c < state.cols.length; c++) {
-        const meta = state.occ[r][c];
-        if (!meta) continue;
-        out.push({
-          x: origin.x0 + colOffset(state.cols, c),
-          y: origin.y0 + colOffset(state.rows, r),
-          w: state.cols[c],
-          h: state.rows[r],
-          meta,
-        });
-      }
-    }
+    eachNode((node) => {
+      if (node.type === "board") out.push(node);
+    });
     out.sort((p, q) => p.meta.seq - q.meta.seq);
     return out;
   }
 
-  return { place, emit };
+  return { placeUpTo, leaves, roots: () => roots };
 }
 
 function orientations(thickness, width) {
@@ -697,58 +898,24 @@ function packLog(diameterAcross, diameterVertical, kerf, boards) {
   const requests = asRequests(boards);
   const a = diameterAcross / 2.0;
   const b = diameterVertical / 2.0;
-  const grid = createCutGrid(a, b, kerf);
+  const saw = createSaw(a, b, kerf);
   const assigned = {};
-  let seq = 0;
 
-  const placedByIndex = {};
-  for (const row of requests) placedByIndex[row.index] = 0;
-
-  function placeSize(thickness, width, meta, companionOk) {
-    for (const [ow, oh] of orientations(thickness, width)) {
-      if (!pieceFitsAlone(ow, oh, a, b, kerf)) continue;
-      if (grid.place(ow, oh, meta, companionOk)) return true;
-    }
-    return false;
-  }
-
-  const commonKeys = new Set(COMMON_SIZES.map(([t, w]) => sizeKey(t, w)));
-  const requestKeys = new Set();
-  for (const row of requests) {
-    if (row.maximize || row.quantity > 0) requestKeys.add(sizeKey(row.thickness, row.width));
-  }
-  // A gap left beside a new board has to be a filler size, not another
-  // requested size and not a partial hole. That keeps every cut full-span.
-  function fillerCompanion(w, h) {
-    const key = sizeKey(w, h);
-    if (requestKeys.has(key)) return false;
-    return commonKeys.has(key);
-  }
-
-  for (const row of requests) {
+  for (let r = 0; r < requests.length; r++) {
+    const row = requests[r];
     const limit = row.maximize ? 400 : row.quantity;
-    for (let n = 0; n < limit; n++) {
-      const meta = {
-        seq: seq + 1,
-        thickness: row.thickness,
-        width: row.width,
-        kind: "request",
-        request_index: row.index,
-      };
-      if (!placeSize(row.thickness, row.width, meta, fillerCompanion)) break;
-      seq += 1;
-      placedByIndex[row.index] += 1;
+    row.placed = saw.placeUpTo(row.thickness, row.width, limit, "request", row.index);
+    if (!row.maximize && row.placed > row.quantity) {
+      throw new Error("Placed more boards than requested.");
     }
   }
 
   const requestedKeys = new Set();
   const requestResults = [];
-  for (const row of requests) {
-    const placed = placedByIndex[row.index];
-    if (!row.maximize && placed > row.quantity) {
-      throw new Error("Placed more boards than requested.");
-    }
-    const [fill, stroke] = colorFor(row.thickness, row.width, assigned);
+  for (let r = 0; r < requests.length; r++) {
+    const row = requests[r];
+    const placed = row.placed || 0;
+    const pair = colorFor(row.thickness, row.width, assigned);
     requestResults.push({
       thickness: row.thickness,
       width: row.width,
@@ -756,8 +923,8 @@ function packLog(diameterAcross, diameterVertical, kerf, boards) {
       maximize: row.maximize,
       placed,
       label: sizeLabel(row.thickness, row.width),
-      fill,
-      stroke,
+      fill: pair[0],
+      stroke: pair[1],
     });
     if (row.maximize || row.quantity > 0) requestedKeys.add(sizeKey(row.thickness, row.width));
   }
@@ -778,44 +945,22 @@ function packLog(diameterAcross, diameterVertical, kerf, boards) {
     return 0;
   });
 
-  const fillerRank = new Map();
-  fillerOrder.forEach(([thickness, width], index) => {
-    const key = sizeKey(thickness, width);
-    if (!fillerRank.has(key)) fillerRank.set(key, index);
-  });
-
   const fillerCounts = new Map();
   for (let index = 0; index < fillerOrder.length; index++) {
-    const [thickness, width] = fillerOrder[index];
+    const thickness = fillerOrder[index][0];
+    const width = fillerOrder[index][1];
     const key = sizeKey(thickness, width);
     if (requestedKeys.has(key)) continue;
-    // Companions may be this size or a smaller filler still ahead in the list.
-    function companionOk(w, h) {
-      const cellKey = sizeKey(w, h);
-      if (requestKeys.has(cellKey) || !commonKeys.has(cellKey)) return false;
-      const rank = fillerRank.get(cellKey);
-      return rank !== undefined && rank >= index;
-    }
-    let count = 0;
-    while (count < 400) {
-      const meta = {
-        seq: seq + 1,
-        thickness,
-        width,
-        kind: "filler",
-        request_index: null,
-      };
-      if (!placeSize(thickness, width, meta, companionOk)) break;
-      seq += 1;
-      count += 1;
-    }
+    const count = saw.placeUpTo(thickness, width, 80, "filler", null, true);
     if (count) fillerCounts.set(key, { thickness, width, count });
   }
 
   const rectangles = [];
-  for (const cell of grid.emit()) {
+  const packed = saw.leaves();
+  for (let i = 0; i < packed.length; i++) {
+    const cell = packed[i];
     const meta = cell.meta;
-    const [fill, stroke] = colorFor(meta.thickness, meta.width, assigned);
+    const pair = colorFor(meta.thickness, meta.width, assigned);
     rectangles.push({
       x: cell.x,
       y: cell.y,
@@ -824,26 +969,28 @@ function packLog(diameterAcross, diameterVertical, kerf, boards) {
       thickness: meta.thickness,
       width: meta.width,
       label: sizeLabel(meta.thickness, meta.width),
-      fill,
-      stroke,
+      fill: pair[0],
+      stroke: pair[1],
       kind: meta.kind,
       request_index: meta.request_index,
     });
   }
 
   const fillerResults = [];
-  for (const [thickness, width] of fillerOrder) {
+  for (let i = 0; i < fillerOrder.length; i++) {
+    const thickness = fillerOrder[i][0];
+    const width = fillerOrder[i][1];
     const found = fillerCounts.get(sizeKey(thickness, width));
     if (!found) continue;
-    const [fill, stroke] = colorFor(thickness, width, assigned);
+    const pair = colorFor(thickness, width, assigned);
     fillerResults.push({
       thickness,
       width,
       quantity: found.count,
       placed: found.count,
       label: sizeLabel(thickness, width),
-      fill,
-      stroke,
+      fill: pair[0],
+      stroke: pair[1],
     });
   }
 
@@ -856,9 +1003,11 @@ function packLog(diameterAcross, diameterVertical, kerf, boards) {
     requests: requestResults,
     filler: fillerResults,
     rectangles,
+    roots: saw.roots(),
     note: NOTE,
   };
 }
+
 
 function renderSvg(result) {
   const a = result.a;
